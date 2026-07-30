@@ -37,6 +37,17 @@ from ..services.browser_automation import BrowserAutomationService
 from ..exceptions import RegistrationError, EmailServiceError
 
 
+_DEFAULT_FIRST_NAMES = ("Alex", "Casey", "Jordan", "Morgan", "Riley", "Taylor")
+_DEFAULT_LAST_NAMES = ("Brown", "Davis", "Garcia", "Johnson", "Miller", "Wilson")
+_DEFAULT_US_LOCATIONS = (
+    ("1200 East Monroe Street", "Phoenix", "AZ", "85004"),
+    ("500 West Madison Street", "Chicago", "IL", "60661"),
+    ("200 Biscayne Boulevard", "Miami", "FL", "33131"),
+    ("901 Market Street", "San Francisco", "CA", "94103"),
+    ("700 5th Avenue", "Seattle", "WA", "98104"),
+)
+
+
 class DigitalPlatRegistrar:
     """
     Main orchestration class for DigitalPlat account registration
@@ -441,9 +452,13 @@ class DigitalPlatRegistrar:
             chars = string.ascii_letters + string.digits + "!@#$%^&*"
             password = ''.join(random.choices(chars, k=self.config.default_password_length))
         
-        # Set default values
+        default_address, default_city, default_state, default_postal_code = random.choice(
+            _DEFAULT_US_LOCATIONS
+        )
+
+        # Compose callers can omit registration data; fill required form fields.
         if not fullname:
-            fullname = f"User {username}"
+            fullname = f"{random.choice(_DEFAULT_FIRST_NAMES)} {random.choice(_DEFAULT_LAST_NAMES)}"
         
         if not phone:
             phone = f"+1-555-{random.randint(100, 999)}-{random.randint(1000, 9999)}"
@@ -457,11 +472,11 @@ class DigitalPlatRegistrar:
             fullname=fullname,
             phone=phone,
             password=password,
-            address_line1=address_line1 or "",
+            address_line1=address_line1 or default_address,
             address_line2=address_line2 or "",
-            city=city or "",
-            state=state or "",
-            postal_code=postal_code or "",
+            city=city or default_city,
+            state=state or default_state,
+            postal_code=postal_code or default_postal_code,
             country=country
         )
     

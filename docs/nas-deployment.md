@@ -21,9 +21,19 @@ cp .env.example .env
 chown 10001:10001 data
 ```
 
-Set every required value in `.env`. `TURNSTILE_REMOTE_ENDPOINT` must be
-reachable from the NAS container. Use a Docker service name when the solver is
-on the same Compose network, or the solver's LAN address when it runs elsewhere.
+The default `.env` is ready to run. Change `TURNSTILE_REMOTE_ENDPOINT` only when
+the NAS cannot reach the existing solver address. Each run generates its own
+username, password, name, phone number, and US address. The supplied referral
+code is already included.
+
+To use a proxy, add these optional values to `.env`:
+
+```text
+PROXY_ENABLED=true
+PROXY_SERVER=http://proxy-host:port
+PROXY_USERNAME=
+PROXY_PASSWORD=
+```
 
 ## Private GHCR Login
 
@@ -48,5 +58,4 @@ docker compose --env-file .env run --rm register
 ```
 
 Successful output ends with `Registration completed successfully`. The detailed
-log is saved to `data/digitalplat-register.log`. Before starting another run,
-replace the one-time registration values in `.env`.
+log is saved to `data/digitalplat-register.log`.
