@@ -1,46 +1,45 @@
 # NAS Deployment
 
-This project runs one registration per container execution. It is deliberately
-not a long-running service, and the Compose service has `restart: "no"` so a
-NAS reboot cannot repeat a registration unexpectedly.
+The Compose service runs one registration and then exits. It deliberately uses
+`restart: "no"`, so a NAS reboot cannot repeat a registration unexpectedly.
 
-## Publish The Image
+## Files And Image
 
-The GitHub workflow publishes `linux/amd64` images to GHCR whenever `main` or a
-`v*` tag is pushed. The current checkout has no Git remote, so first create or
-connect the GitHub repository, then push the files in this project. The image
-name is:
+Copy `docker-compose.yml` and `.env.example` to a persistent NAS directory,
+then rename the latter to `.env`. The published `linux/amd64` image is:
 
 ```text
-ghcr.io/<github-owner>/digitalplat-auto-register:latest
+ghcr.io/jeck5001/digitalplat-auto-register:latest
 ```
 
-For a private GitHub package, log the NAS in to GHCR with a token that has the
-minimum `read:packages` scope before pulling the image.
-
-## Configure The NAS
-
-Copy these files to a persistent NAS folder, for example
-`/vol1/docker/digitalplat-register`:
-
-- `docker-compose.yml`
-- `.env.example`, renamed to `.env`
-
-Create a writable log folder for the image's unprivileged user:
+On the NAS, prepare the directory and edit the environment file:
 
 ```bash
-mkdir -p data
+mkdir -p /vol1/docker/digitalplat-register/data
+cd /vol1/docker/digitalplat-register
+cp .env.example .env
 chown 10001:10001 data
 ```
 
 Set every required value in `.env`. `TURNSTILE_REMOTE_ENDPOINT` must be
 reachable from the NAS container. Use a Docker service name when the solver is
-on the same Compose network, or use the LAN address when it runs elsewhere.
+on the same Compose network, or the solver's LAN address when it runs elsewhere.
 
-## Run And Verify
+## Private GHCR Login
 
-Render the effective configuration before executing it, then pull and run one
-task:
+The package follows the repository's private access. Create a GitHub classic
+personal access token with only the `read:packages` scope, then log the NAS in
+interactively:
+
+```bash
+docker login ghcr.io -u jeck5001
+```
+
+Do not put the token in `.env` or commit it to the NAS project folder.
+
+## Pull And Run
+
+Validate the rendered settings, pull the published image, then run the task:
 
 ```bash
 docker compose --env-file .env config
@@ -49,5 +48,5 @@ docker compose --env-file .env run --rm register
 ```
 
 Successful output ends with `Registration completed successfully`. The detailed
-log is written to `data/digitalplat-register.log`. Run a new registration only
-after replacing the one-time profile values in `.env`.
+log is saved to `data/digitalplat-register.log`. Before starting another run,
+replace the one-time registration values in `.env`.
