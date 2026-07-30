@@ -23,11 +23,7 @@ services:
       PROXY_SERVER: ${PROXY_SERVER:-}
       PROXY_USERNAME: ${PROXY_USERNAME:-}
       PROXY_PASSWORD: ${PROXY_PASSWORD:-}
-    volumes:
-      - ./data:/app/data
     command:
-      - --log-file
-      - /app/data/digitalplat-register.log
       - single
       - --referral-code
       - ${REFERRAL_CODE:-}
