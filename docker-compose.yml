@@ -1,0 +1,49 @@
+name: digitalplat-register
+
+services:
+  register:
+    image: ${IMAGE:?Set IMAGE in .env}
+    pull_policy: always
+    init: true
+    shm_size: 1gb
+    restart: "no"
+    environment:
+      TURNSTILE_SOLVER_TYPE: remote
+      TURNSTILE_REMOTE_ENDPOINT: ${TURNSTILE_REMOTE_ENDPOINT:?Set TURNSTILE_REMOTE_ENDPOINT in .env}
+      TURNSTILE_TIMEOUT: ${TURNSTILE_TIMEOUT:-120}
+      BROWSER_ENGINE: ${BROWSER_ENGINE:-camoufox}
+      BROWSER_HEADLESS: "true"
+      BROWSER_TIMEOUT: ${BROWSER_TIMEOUT:-90000}
+      EMAIL_PROVIDER: mail.td
+      EMAIL_TIMEOUT: ${EMAIL_TIMEOUT:-300}
+      VERIFICATION_TIMEOUT: ${VERIFICATION_TIMEOUT:-300}
+      VERIFICATION_CHECK_INTERVAL: ${VERIFICATION_CHECK_INTERVAL:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PROXY_ENABLED: ${PROXY_ENABLED:-false}
+      PROXY_SERVER: ${PROXY_SERVER:-}
+      PROXY_USERNAME: ${PROXY_USERNAME:-}
+      PROXY_PASSWORD: ${PROXY_PASSWORD:-}
+    volumes:
+      - ./data:/app/data
+    command:
+      - --log-file
+      - /app/data/digitalplat-register.log
+      - single
+      - --username
+      - ${REGISTRATION_USERNAME:?Set REGISTRATION_USERNAME in .env}
+      - --fullname
+      - ${REGISTRATION_FULLNAME:?Set REGISTRATION_FULLNAME in .env}
+      - --phone
+      - ${REGISTRATION_PHONE:?Set REGISTRATION_PHONE in .env}
+      - --address-line1
+      - ${REGISTRATION_ADDRESS_LINE1:?Set REGISTRATION_ADDRESS_LINE1 in .env}
+      - --city
+      - ${REGISTRATION_CITY:?Set REGISTRATION_CITY in .env}
+      - --state
+      - ${REGISTRATION_STATE:?Set REGISTRATION_STATE in .env}
+      - --postal-code
+      - ${REGISTRATION_POSTAL_CODE:?Set REGISTRATION_POSTAL_CODE in .env}
+      - --country
+      - ${REGISTRATION_COUNTRY:-US}
+      - --referral-code
+      - ${REFERRAL_CODE:-}
