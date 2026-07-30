@@ -1,0 +1,12 @@
+.env
+.DS_Store
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+data/
+*.log
+config.local.yaml
