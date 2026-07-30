@@ -1,0 +1,28 @@
+# Core dependencies for DigitalPlat Automation
+playwright>=1.45.0,<1.61.0
+camoufox>=0.5.4
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+fake-useragent>=1.5.0
+colorama>=0.4.6
+
+# Configuration and utilities
+pydantic>=2.5.0
+pyyaml>=6.0.0
+python-dotenv>=1.0.0
+
+# Browser automation utilities
+asyncio-pool>=0.5.2
+aiohttp>=3.9.0
+
+# Email handling
+html2text>=2020.1.16
+email-validator>=2.1.0
+
+# Logging and monitoring
+loguru>=0.7.0
+dataclasses-json>=0.6.0
+
+# CLI interface
+click>=8.1.0
+rich>=13.0.0
