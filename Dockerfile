@@ -10,7 +10,7 @@ WORKDIR /app
 RUN groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --create-home --shell /usr/sbin/nologin app
 
-COPY pyproject.toml README.md setup.py ./
+COPY pyproject.toml README.md requirements.txt setup.py ./
 COPY src ./src
 
 RUN pip install . \
