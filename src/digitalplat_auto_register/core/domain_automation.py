@@ -20,6 +20,7 @@ import requests
 
 DEFAULT_API_BASE = "https://domain-api.digitalplat.org/api/v1"
 DEFAULT_DATA_PATH = "/app/data/domain-automation.json"
+DEFAULT_SEPARATOR = ""
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
@@ -227,7 +228,7 @@ class PrefixSubscription:
     nameservers: List[str]
     slot_type: str = "subscription"
     random_length: int = 6
-    separator: str = "-"
+    separator: str = DEFAULT_SEPARATOR
     enabled: bool = True
     id: str = field(default_factory=lambda: uuid4().hex[:12])
     created_at: str = field(default_factory=_timestamp)
@@ -377,7 +378,7 @@ class DomainAutomationManager:
     def normalize_subscription(request: Dict[str, Any]) -> Dict[str, Any]:
         prefix = str(request.get("prefix", "")).strip().lower()
         suffix = str(request.get("suffix", "")).strip().lower().lstrip(".")
-        separator = str(request.get("separator", "-")).strip()
+        separator = str(request.get("separator", DEFAULT_SEPARATOR)).strip()
         random_length = request.get("random_length", 6)
         slot_type = str(request.get("slot_type", "subscription")).strip().lower()
         nameservers = [str(value).strip().lower().rstrip(".") for value in request.get("nameservers", []) if str(value).strip()]
@@ -391,6 +392,11 @@ class DomainAutomationManager:
             raise ValueError("Random length must be between 2 and 24")
         if slot_type not in {"free", "paid", "subscription"}:
             raise ValueError("Slot type must be free, paid, or subscription")
+        # DigitalPlat's dpdns.org registration flow rejects the generated
+        # dashed labels used by the old UI. Keep the stored option readable,
+        # but always generate a compact label for this suffix.
+        if suffix == "dpdns.org":
+            separator = DEFAULT_SEPARATOR
         if len(nameservers) < 2 or any(not HOSTNAME_PATTERN.fullmatch(value) for value in nameservers):
             raise ValueError("At least two valid nameserver hostnames are required")
         if len(prefix) + len(separator) + random_length > 63:
@@ -428,7 +434,8 @@ class DomainAutomationManager:
     def _candidate(self, subscription: PrefixSubscription) -> str:
         alphabet = string.ascii_lowercase + string.digits
         random_part = "".join(random.SystemRandom().choice(alphabet) for _ in range(subscription.random_length))
-        label = f"{subscription.prefix}{subscription.separator if subscription.prefix else ''}{random_part}"
+        separator = "" if subscription.suffix == "dpdns.org" else subscription.separator
+        label = f"{subscription.prefix}{separator if subscription.prefix else ''}{random_part}"
         return f"{label}.{subscription.suffix}"
 
     @staticmethod

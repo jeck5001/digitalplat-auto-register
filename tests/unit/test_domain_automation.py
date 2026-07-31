@@ -147,3 +147,36 @@ def test_api_client_uses_browser_compatible_headers():
 
     assert client.headers["User-Agent"] == DEFAULT_USER_AGENT
     assert client.headers["Accept"] == "application/json, text/plain, */*"
+
+
+def test_dpdns_candidates_never_use_hyphen_separator(tmp_path):
+    store = DomainAutomationStore(tmp_path / "domain-automation.json")
+    manager = DomainAutomationManager(store, FakeDomainClient)
+    subscription = PrefixSubscription(
+        name="DPDNS",
+        prefix="guagua",
+        suffix="dpdns.org",
+        nameservers=["ns1.provider.com", "ns2.provider.com"],
+        random_length=6,
+        separator="-",
+    )
+
+    candidate = manager._candidate(subscription)
+
+    assert candidate.startswith("guagua")
+    assert not candidate.startswith("guagua-")
+    assert candidate.endswith(".dpdns.org")
+
+
+def test_dpdns_subscription_normalization_removes_hyphen():
+    subscription = DomainAutomationManager.normalize_subscription({
+        "name": "DPDNS",
+        "prefix": "guagua",
+        "suffix": "dpdns.org",
+        "slot_type": "free",
+        "random_length": 6,
+        "separator": "-",
+        "nameservers": ["ns1.provider.com", "ns2.provider.com"],
+    })
+
+    assert subscription["separator"] == ""
