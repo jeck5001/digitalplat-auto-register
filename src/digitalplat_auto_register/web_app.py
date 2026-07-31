@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import logging
 import os
 import secrets
 import tempfile
@@ -17,6 +18,8 @@ from uuid import uuid4
 import uvicorn
 from fastapi import FastAPI, HTTPException, Response, status
 from fastapi.responses import HTMLResponse
+
+logger = logging.getLogger(__name__)
 
 from .core.account import (
     Account, AccountStatus, AccountStore, BatchRegistrationJob
@@ -218,6 +221,8 @@ class RegistrationManager:
 
         try:
             result = await register_with_defaults(
+                username=account.username,
+                password=account.password,
                 referral_code=job.referral_code,
                 phone=_generate_phone_number(),
                 on_step_complete=on_step_complete,
@@ -227,11 +232,14 @@ class RegistrationManager:
             if result.success:
                 account.username = result.username or account.username
                 account.email = result.email or ""
+                if result.password:
+                    account.password = result.password
                 account.mark_active()
                 job.result = {
                     "success": True,
                     "username": account.username,
                     "email": account.email,
+                    "password": account.password,
                     "duration": result.total_duration,
                 }
                 job.status = "succeeded"
@@ -274,14 +282,21 @@ class RegistrationManager:
                 try:
                     result = await register_with_defaults(
                         username=account.username,
+                        password=account.password,
                         referral_code=batch_job.referral_code or DEFAULT_REFERRAL_CODE,
                         phone=_generate_phone_number(),
                     )
                     
                     if result.success:
+                        # Update account with actual registered values
                         account.email = result.email or ""
+                        if result.username:
+                            account.username = result.username
+                        if result.password:
+                            account.password = result.password
                         account.mark_active()
                         batch_job.successful_accounts += 1
+                        logger.info(f"Account registered: {account.username} ({account.email})")
                     else:
                         account.mark_failed(result.error or "Unknown error", result.error_stage)
                         batch_job.failed_accounts += 1
@@ -685,6 +700,10 @@ def create_app(
             if result.success:
                 if result.email:
                     account.email = result.email
+                if result.username:
+                    account.username = result.username
+                if result.password:
+                    account.password = result.password
                 account.mark_active()
             else:
                 account.mark_failed(result.error or "Unknown error", result.error_stage)
