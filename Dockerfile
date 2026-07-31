@@ -21,7 +21,7 @@ RUN pip install . \
     && python -m compileall -q /app/src \
     && digitalplat-register --help > /dev/null \
     && digitalplat-register-web --help > /dev/null \
-    && mkdir /app/data \
+    && mkdir -p /app/data \
     && chown -R app:app /app /home/app \
     && chmod 0755 /usr/local/bin/docker-entrypoint
 
