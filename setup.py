@@ -47,6 +47,7 @@ setup(
         "dev": [
             "pytest>=7.0",
             "pytest-cov>=4.0",
+            "httpx2>=0.1.0",
             "black>=22.0",
             "flake8>=5.0",
             "mypy>=0.991",
@@ -56,6 +57,7 @@ setup(
     entry_points={
         "console_scripts": [
             "digitalplat-register=digitalplat_auto_register.cli:main",
+            "digitalplat-register-web=digitalplat_auto_register.web_app:main",
         ],
     },
     include_package_data=True,
