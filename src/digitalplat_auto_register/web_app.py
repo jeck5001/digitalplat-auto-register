@@ -26,6 +26,7 @@ from .core.account import (
 )
 from .core.domain_automation import (
     APITokenRecord,
+    CloudflareSettings,
     DomainAutomationManager,
     DomainAutomationStore,
     PrefixSubscription,
@@ -1097,6 +1098,40 @@ def create_app(
             return await domain_manager.test_token(token_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="API Token not found") from error
+
+    @app.put("/api/domain-automation/cloudflare")
+    async def save_cloudflare_settings(request: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            data = domain_manager.normalize_cloudflare_settings(request)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        domain_store.cloudflare = CloudflareSettings(**data)
+        await domain_store.save()
+        return domain_store.cloudflare.safe_dict()
+
+    @app.delete("/api/domain-automation/cloudflare")
+    async def delete_cloudflare_settings() -> Dict[str, Any]:
+        domain_store.cloudflare = None
+        await domain_store.save()
+        return {"deleted": True}
+
+    @app.post("/api/domain-automation/cloudflare/test")
+    async def test_cloudflare_settings() -> Dict[str, Any]:
+        try:
+            return await domain_manager.test_cloudflare()
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.post("/api/domain-automation/domains/{domain}/cloudflare")
+    async def host_domain_on_cloudflare(domain: str) -> Dict[str, Any]:
+        try:
+            return await domain_manager.host_domain_on_cloudflare(domain)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.post("/api/domain-automation/domains/sync")
+    async def sync_digitalplat_domains() -> Dict[str, Any]:
+        return await domain_manager.sync_domains()
 
     @app.post("/api/domain-automation/subscriptions", status_code=status.HTTP_201_CREATED)
     async def create_prefix_subscription(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -2237,7 +2272,7 @@ DOMAIN_AUTOMATION_HTML = """<!doctype html>
     #connection { color:#b9c8c1;font-size:12px;display:flex;align-items:center;gap:8px; }
     #connection::before { content:"";width:8px;height:8px;border-radius:50%;background:#42d39a;box-shadow:0 0 0 4px rgba(66,211,154,.13); }
     main { max-width:1420px;margin:0 auto;padding:28px 24px 60px; }
-    .metrics { display:grid;grid-template-columns:repeat(5,1fr);border-bottom:1px solid var(--line);margin-bottom:28px; }
+    .metrics { display:grid;grid-template-columns:repeat(6,1fr);border-bottom:1px solid var(--line);margin-bottom:28px; }
     .metric { padding:4px 22px 19px;border-right:1px solid var(--line); }
     .metric:first-child { padding-left:0; }.metric:last-child { border:0; }
     .metric-label,.hint { color:var(--muted);font-size:12px;line-height:1.55; }
@@ -2250,6 +2285,8 @@ DOMAIN_AUTOMATION_HTML = """<!doctype html>
     label { display:block;color:var(--muted);font-size:12px;margin:0 0 6px; }
     input,select { width:100%;border:1px solid #cbd7d1;border-radius:7px;padding:10px 11px;font:inherit;color:var(--ink);background:#fff; }
     input:focus,select:focus { outline:0;border-color:var(--green);box-shadow:0 0 0 3px rgba(8,127,91,.1); }
+    .check-line { display:flex;align-items:flex-start;gap:10px;padding:11px 12px;border:1px solid var(--line);border-radius:8px;background:#f8faf9; }
+    .check-line input { width:auto;margin:3px 0 0;accent-color:var(--green); }.check-line label { margin:0;color:var(--ink);font-size:12px; }
     .form-grid { display:grid;grid-template-columns:1fr 1fr;gap:13px; }
     .full { grid-column:1/-1; }.actions { display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:16px; }
     button { border:0;border-radius:7px;padding:9px 15px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:.15s; }
@@ -2259,7 +2296,7 @@ DOMAIN_AUTOMATION_HTML = """<!doctype html>
     .list-row:last-child { border:0;padding-bottom:0; }.list-row:first-child { padding-top:0; }
     .row-title { font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }.row-meta { color:var(--muted);font-size:11px;margin-top:4px; }
     .badge { display:inline-block;padding:4px 8px;border-radius:6px;font-size:10px;font-weight:700;letter-spacing:.02em; }
-    .badge-valid,.badge-completed,.badge-succeeded { color:var(--green);background:var(--green-soft); }.badge-invalid,.badge-failed { color:var(--red);background:#fbe9e7; }.badge-running,.badge-pending { color:var(--blue);background:#eaf0ff; }.badge-untested { color:var(--muted);background:#edf1ef; }
+    .badge-valid,.badge-completed,.badge-succeeded,.badge-active { color:var(--green);background:var(--green-soft); }.badge-invalid,.badge-failed { color:var(--red);background:#fbe9e7; }.badge-running,.badge-pending { color:var(--blue);background:#eaf0ff; }.badge-untested,.badge-unmanaged { color:var(--muted);background:#edf1ef; }
     .token-line { display:flex;align-items:center;gap:8px;flex-wrap:wrap; }.token-mask { font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#415149; }
     table { width:100%;border-collapse:collapse; }th,td { text-align:left;padding:11px 13px;border-bottom:1px solid var(--line);font-size:12px;vertical-align:top; }
     th { color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.04em;background:#f7f9f8; }tbody tr:hover { background:#fbfcfb; }
@@ -2280,7 +2317,7 @@ DOMAIN_AUTOMATION_HTML = """<!doctype html>
   </style>
 </head>
 <body>
-  <header><div><h1>DigitalPlat 域名自动注册</h1><div class="subtitle">新增模块 · 多 Token 调度 · 前缀订阅 · 注册结果回查</div></div><div class="header-actions"><a class="back-link" href="/">← 返回原控制台</a><div id="connection">正在连接</div></div></header>
+  <header><div><h1>DigitalPlat 域名自动注册</h1><div class="subtitle">多 Token 调度 · 前缀订阅 · Cloudflare 自动托管 · 注册结果回查</div></div><div class="header-actions"><a class="back-link" href="/">← 返回原控制台</a><div id="connection">正在连接</div></div></header>
   <main>
     <section class="metrics">
       <div class="metric"><div class="metric-label">API Token</div><div class="metric-value" id="stat-tokens">0</div></div>
@@ -2288,12 +2325,19 @@ DOMAIN_AUTOMATION_HTML = """<!doctype html>
       <div class="metric"><div class="metric-label">前缀订阅</div><div class="metric-value" id="stat-subscriptions">0</div></div>
       <div class="metric"><div class="metric-label">运行任务</div><div class="metric-value" id="stat-running">0</div></div>
       <div class="metric"><div class="metric-label">注册成功</div><div class="metric-value" id="stat-domains" style="color:var(--green)">0</div></div>
+      <div class="metric"><div class="metric-label">Cloudflare Active</div><div class="metric-value" id="stat-cloudflare" style="color:var(--blue)">0</div></div>
     </section>
     <div class="layout">
       <div class="stack">
         <section class="panel"><div class="panel-head"><h2>API Token 池</h2><span class="hint">仅服务端保存</span></div><div class="panel-body">
           <div class="form-grid"><div><label>Token 名称</label><input id="token-name" placeholder="例如：账号 A"></div><div><label>DigitalPlat API Token</label><input id="token-value" type="password" placeholder="dp_live_..."></div></div>
           <div class="actions"><button class="primary" onclick="addToken()">添加 Token</button><span class="hint">页面不会回显 Token 原文</span></div><div id="token-list" class="list" style="margin-top:18px"></div>
+        </div></section>
+        <section class="panel"><div class="panel-head"><h2>Cloudflare 托管</h2><span class="hint">Zone 与 NS 自动配置</span></div><div class="panel-body">
+          <div class="notice">API Token 建议只授予 <strong>Zone / Zone / Edit</strong> 权限，并限制到目标账户。系统创建 Zone 后读取专属 NS，再通过对应的 DigitalPlat Token 更新委派。</div>
+          <div class="form-grid"><div><label>Cloudflare Account ID</label><input id="cf-account-id" placeholder="32 位 Account ID"></div><div><label>Cloudflare API Token</label><input id="cf-token" type="password" placeholder="仅保存于服务端"></div></div>
+          <div class="actions"><button class="primary" onclick="saveCloudflare()">保存配置</button><button class="secondary" onclick="testCloudflare()">测试</button><button class="danger-link" onclick="deleteCloudflare()">删除</button></div>
+          <div id="cloudflare-state" class="hint" style="margin-top:13px">尚未配置</div>
         </div></section>
         <section class="panel"><div class="panel-head"><h2>前缀订阅</h2><span class="hint">自动生成候选域名</span></div><div class="panel-body">
           <div class="form-grid">
@@ -2303,7 +2347,8 @@ DOMAIN_AUTOMATION_HTML = """<!doctype html>
             <div><label>容量类型</label><select id="sub-slot"><option value="subscription">subscription</option><option value="paid">paid</option><option value="free">free</option></select></div>
             <div><label>随机字符长度</label><input id="sub-length" type="number" min="2" max="24" value="6"></div>
             <div><label>前缀分隔符</label><select id="sub-separator"><option value="">无分隔符（推荐），例如 bloga1b2c3</option><option value="-">连字符，例如 blog-a1b2c3</option></select><div class="hint">dpdns.org 会强制使用无分隔符</div></div>
-            <div class="full"><label>Nameservers（每行一个）</label><input id="sub-ns1" value="ns1.provider.com" style="margin-bottom:8px"><input id="sub-ns2" value="ns2.provider.com"></div>
+            <div class="full check-line"><input id="sub-auto-cloudflare" type="checkbox" onchange="toggleNameservers()"><label for="sub-auto-cloudflare"><strong>注册成功后自动托管到 Cloudflare</strong><br><span class="hint">自动创建 Zone、更新 DigitalPlat NS，并显示激活状态</span></label></div>
+            <div class="full" id="manual-nameservers"><label>手动 Nameservers（每行一个）</label><input id="sub-ns1" value="ns1.provider.com" style="margin-bottom:8px"><input id="sub-ns2" value="ns2.provider.com"></div>
           </div>
           <div class="actions"><button class="primary" onclick="addSubscription()">创建订阅</button></div><div id="subscription-list" class="list" style="margin-top:18px"></div>
         </div></section>
@@ -2315,28 +2360,37 @@ DOMAIN_AUTOMATION_HTML = """<!doctype html>
           <div class="actions"><button class="primary" id="start-job" onclick="startJob()">开始自动注册</button></div>
         </div></section>
         <section class="panel"><div class="panel-head"><h2>注册任务与详细进度</h2><span class="hint">每 3 秒刷新</span></div><div id="job-list"></div></section>
-        <section class="panel"><div class="panel-head"><h2>已注册域名</h2><span class="hint" id="domain-count">0 个</span></div><div class="table-wrap"><table><thead><tr><th>域名</th><th>Token</th><th>容量</th><th>状态</th><th>注册时间</th></tr></thead><tbody id="domain-table"></tbody></table></div></section>
+        <section class="panel"><div class="panel-head"><h2>已注册域名</h2><div class="actions" style="margin:0"><span class="hint" id="domain-count">0 个</span><button class="secondary" onclick="syncDomains()">从 DigitalPlat 同步</button><button class="secondary" onclick="hostAllCloudflare()">托管全部未激活域名</button></div></div><div class="table-wrap"><table><thead><tr><th>域名</th><th>Token</th><th>容量</th><th>Cloudflare</th><th>注册时间</th><th>操作</th></tr></thead><tbody id="domain-table"></tbody></table></div></section>
       </div>
     </div>
   </main>
   <script>
-    let overview = {tokens:[],subscriptions:[],jobs:[],domains:[],stats:{}};
+    let overview = {tokens:[],subscriptions:[],jobs:[],domains:[],cloudflare:null,stats:{}};
     const esc = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-    const badge = status => `<span class="badge badge-${esc(status)}">${esc(({valid:'有效',invalid:'异常',untested:'未测试',running:'运行中',pending:'等待中',completed:'已完成',failed:'失败',succeeded:'成功'})[status] || status)}</span>`;
+    const badge = status => `<span class="badge badge-${esc(status)}">${esc(({valid:'有效',invalid:'异常',untested:'未测试',running:'运行中',pending:'等待中',completed:'已完成',failed:'失败',succeeded:'成功',active:'已激活',unmanaged:'未托管'})[status] || status)}</span>`;
     const time = value => value ? new Date(value).toLocaleString() : '-';
     function toast(message, error=false){const el=document.createElement('div');el.className='toast';el.style.background=error?'var(--red)':'#14231d';el.textContent=message;document.body.appendChild(el);setTimeout(()=>el.remove(),3200)}
     async function api(path, options={}){const response=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.detail||data.error||`HTTP ${response.status}`);return data}
     async function refresh(){try{overview=await api('/api/domain-automation');render();document.getElementById('connection').textContent='已更新 '+new Date().toLocaleTimeString()}catch(error){document.getElementById('connection').textContent='服务连接失败'}}
-    function render(){const s=overview.stats||{};document.getElementById('stat-tokens').textContent=s.tokens||0;document.getElementById('stat-enabled').textContent=s.enabled_tokens||0;document.getElementById('stat-subscriptions').textContent=s.subscriptions||0;document.getElementById('stat-running').textContent=s.running_jobs||0;document.getElementById('stat-domains').textContent=s.registered_domains||0;renderTokens();renderSubscriptions();renderJobs();renderDomains()}
+    function render(){const s=overview.stats||{};document.getElementById('stat-tokens').textContent=s.tokens||0;document.getElementById('stat-enabled').textContent=s.enabled_tokens||0;document.getElementById('stat-subscriptions').textContent=s.subscriptions||0;document.getElementById('stat-running').textContent=s.running_jobs||0;document.getElementById('stat-domains').textContent=s.registered_domains||0;document.getElementById('stat-cloudflare').textContent=s.cloudflare_active||0;renderTokens();renderCloudflare();renderSubscriptions();renderJobs();renderDomains()}
+    function renderCloudflare(){const c=overview.cloudflare;const state=document.getElementById('cloudflare-state');if(!c){state.innerHTML='尚未配置';return}document.getElementById('cf-account-id').value=c.account_id||'';state.innerHTML=`${badge(c.last_status)} <span class="token-mask">${esc(c.token_masked)}</span>${c.last_checked_at?' · '+time(c.last_checked_at):''}${c.last_error?' · '+esc(c.last_error):''}`}
     function renderTokens(){const root=document.getElementById('token-list');root.innerHTML=overview.tokens.length?overview.tokens.map(t=>`<div class="list-row"><div><div class="token-line"><span class="row-title">${esc(t.name)}</span>${badge(t.last_status)}</div><div class="row-meta"><span class="token-mask">${esc(t.token_masked)}</span> · ${t.domain_count==null?'域名数未知':t.domain_count+' 个域名'}${t.last_error?' · '+esc(t.last_error):''}</div></div><div><button class="secondary" onclick="testToken('${t.id}')">测试</button><button class="danger-link" onclick="deleteToken('${t.id}')">删除</button></div></div>`).join(''):'<div class="empty">尚未添加 API Token</div>'}
-    function renderSubscriptions(){const root=document.getElementById('subscription-list');root.innerHTML=overview.subscriptions.length?overview.subscriptions.map(s=>{const separator=s.suffix==='dpdns.org'?'':s.separator;return `<div class="list-row"><div><div class="row-title">${esc(s.name)}</div><div class="row-meta">${esc(s.prefix||'[随机]')}${esc(separator)}${'x'.repeat(Math.min(s.random_length,8))}.${esc(s.suffix)} · ${esc(s.slot_type)}<br>${s.nameservers.map(esc).join(' · ')}</div></div><button class="danger-link" onclick="deleteSubscription('${s.id}')">删除</button></div>`}).join(''):'<div class="empty">尚未创建前缀订阅</div>';const select=document.getElementById('job-subscription');const current=select.value;select.innerHTML='<option value="">选择一个前缀订阅</option>'+overview.subscriptions.map(s=>`<option value="${s.id}">${esc(s.name)} — ${esc(s.prefix||'[随机]')}.${esc(s.suffix)}</option>`).join('');if(overview.subscriptions.some(s=>s.id===current))select.value=current}
+    function renderSubscriptions(){const root=document.getElementById('subscription-list');root.innerHTML=overview.subscriptions.length?overview.subscriptions.map(s=>{const separator=s.suffix==='dpdns.org'?'':s.separator;const routing=s.auto_cloudflare?'Cloudflare 自动托管':s.nameservers.map(esc).join(' · ');return `<div class="list-row"><div><div class="row-title">${esc(s.name)} ${s.auto_cloudflare?badge('active'):''}</div><div class="row-meta">${esc(s.prefix||'[随机]')}${esc(separator)}${'x'.repeat(Math.min(s.random_length,8))}.${esc(s.suffix)} · ${esc(s.slot_type)}<br>${routing}</div></div><button class="danger-link" onclick="deleteSubscription('${s.id}')">删除</button></div>`}).join(''):'<div class="empty">尚未创建前缀订阅</div>';const select=document.getElementById('job-subscription');const current=select.value;select.innerHTML='<option value="">选择一个前缀订阅</option>'+overview.subscriptions.map(s=>`<option value="${s.id}">${esc(s.name)} — ${esc(s.prefix||'[随机]')}.${esc(s.suffix)}</option>`).join('');if(overview.subscriptions.some(s=>s.id===current))select.value=current}
     function attemptSteps(attempt){const order=['candidate_generation','token_assignment','registration_request','registration_verification'];const byName=Object.fromEntries((attempt.steps||[]).map(s=>[s.name,s]));return `<div class="steps">${order.map(name=>{const step=byName[name]||{label:({'candidate_generation':'生成候选域名','token_assignment':'分配 API Token','registration_request':'提交注册请求','registration_verification':'确认注册结果'})[name],status:'pending',message:'等待执行'};const icon=step.status==='success'?'✓':step.status==='failed'?'!':'';return `<div class="step ${esc(step.status)}"><span class="dot">${icon}</span><div class="step-name">${esc(step.label)}</div><div class="step-message">${esc(step.message)}</div></div>`}).join('')}</div>`}
     function renderJobs(){const root=document.getElementById('job-list');const openJobs=new Set([...document.querySelectorAll('.job[open]')].map(e=>e.dataset.id));const openAttempts=new Set([...document.querySelectorAll('.attempt[open]')].map(e=>e.dataset.id));if(!overview.jobs.length){root.innerHTML='<div class="empty">暂无注册任务</div>';return}root.innerHTML=overview.jobs.map((j,index)=>{const pct=Math.round((j.completed_attempts/Math.max(j.max_attempts,1))*100);const attempts=(j.attempts||[]).map((a,i)=>`<details class="attempt" data-id="${a.id}" ${openAttempts.has(a.id)||(!index&&!i)?'open':''}><summary class="attempt-summary"><div><div class="row-title">${esc(a.domain)}</div><div class="row-meta">${time(a.created_at)}</div></div><div class="attempt-token hint">${esc(a.token_name)}</div><div>${badge(a.status)}</div><div class="chevron">›</div></summary>${attemptSteps(a)}${a.error?`<div class="hint" style="color:var(--red);padding-bottom:14px">${esc(a.error)}</div>`:''}</details>`).join('');return `<details class="job" data-id="${j.id}" ${openJobs.has(j.id)||index===0?'open':''}><summary class="job-summary"><div><div class="row-title">任务 <span class="task-id">${esc(j.id)}</span></div><div class="row-meta">成功 ${j.successful_domains}/${j.target_count} · 失败尝试 ${j.failed_attempts}</div></div><div>${badge(j.status)}</div><div class="job-progress"><div class="hint">尝试 ${j.completed_attempts}/${j.max_attempts}</div><div class="progress"><span style="width:${pct}%"></span></div></div><div class="chevron">›</div></summary><div class="job-body">${j.error?`<div class="hint" style="color:var(--red);padding-top:13px">${esc(j.error)}</div>`:''}${attempts||'<div class="empty">等待生成候选域名</div>'}</div></details>`}).join('')}
-    function renderDomains(){document.getElementById('domain-count').textContent=overview.domains.length+' 个';document.getElementById('domain-table').innerHTML=overview.domains.length?overview.domains.map(d=>`<tr><td><strong>${esc(d.domain)}</strong><div class="hint">${(d.nameservers||[]).map(esc).join(' · ')}</div></td><td>${esc(d.token_name)}</td><td>${esc(d.slot_type)}</td><td>${badge(d.status||'ok')}</td><td>${time(d.registered_at)}</td></tr>`).join(''):'<tr><td colspan="5" class="empty">暂无成功注册的域名</td></tr>'}
+    function cloudflareDetail(d){const steps=(d.cloudflare_steps||[]).map(s=>`${esc(s.label)}：${esc(s.message)}`).join('<br>');return `${badge(d.cloudflare_status||'unmanaged')}${steps?`<div class="hint" style="margin-top:5px">${steps}</div>`:''}${d.cloudflare_error?`<div class="hint" style="color:var(--red)">${esc(d.cloudflare_error)}</div>`:''}`}
+    function renderDomains(){document.getElementById('domain-count').textContent=overview.domains.length+' 个';document.getElementById('domain-table').innerHTML=overview.domains.length?overview.domains.map(d=>`<tr><td><strong>${esc(d.domain)}</strong><div class="hint">${(d.nameservers||[]).map(esc).join(' · ')||'尚未设置 NS'}</div></td><td>${esc(d.token_name)}</td><td>${esc(d.slot_type)}</td><td>${cloudflareDetail(d)}</td><td>${time(d.registered_at)}</td><td><button class="secondary" onclick="hostCloudflare('${esc(d.domain)}')">${d.cloudflare_status?'重试/刷新':'托管到 Cloudflare'}</button></td></tr>`).join(''):'<tr><td colspan="6" class="empty">暂无成功注册的域名</td></tr>'}
     async function addToken(){try{await api('/api/domain-automation/tokens',{method:'POST',body:JSON.stringify({name:document.getElementById('token-name').value,token:document.getElementById('token-value').value})});document.getElementById('token-value').value='';toast('Token 已添加');await refresh()}catch(e){toast(e.message,true)}}
     async function testToken(id){try{toast('正在测试 Token');await api(`/api/domain-automation/tokens/${id}/test`,{method:'POST'});await refresh()}catch(e){toast(e.message,true)}}
     async function deleteToken(id){if(!confirm('确认删除这个 API Token？'))return;try{await api(`/api/domain-automation/tokens/${id}`,{method:'DELETE'});await refresh()}catch(e){toast(e.message,true)}}
-    async function addSubscription(){try{await api('/api/domain-automation/subscriptions',{method:'POST',body:JSON.stringify({name:document.getElementById('sub-name').value,prefix:document.getElementById('sub-prefix').value,suffix:document.getElementById('sub-suffix').value,slot_type:document.getElementById('sub-slot').value,random_length:Number(document.getElementById('sub-length').value),separator:document.getElementById('sub-separator').value,nameservers:[document.getElementById('sub-ns1').value,document.getElementById('sub-ns2').value]})});toast('前缀订阅已创建');await refresh()}catch(e){toast(e.message,true)}}
+    function toggleNameservers(){document.getElementById('manual-nameservers').style.display=document.getElementById('sub-auto-cloudflare').checked?'none':'block'}
+    async function saveCloudflare(){try{await api('/api/domain-automation/cloudflare',{method:'PUT',body:JSON.stringify({account_id:document.getElementById('cf-account-id').value,api_token:document.getElementById('cf-token').value})});document.getElementById('cf-token').value='';toast('Cloudflare 配置已保存');await refresh()}catch(e){toast(e.message,true)}}
+    async function testCloudflare(){try{toast('正在测试 Cloudflare Token');await api('/api/domain-automation/cloudflare/test',{method:'POST'});await refresh()}catch(e){toast(e.message,true)}}
+    async function deleteCloudflare(){if(!confirm('确认删除 Cloudflare 配置？'))return;try{await api('/api/domain-automation/cloudflare',{method:'DELETE'});document.getElementById('cf-account-id').value='';toast('Cloudflare 配置已删除');await refresh()}catch(e){toast(e.message,true)}}
+    async function hostCloudflare(domain){try{toast('正在配置 '+domain);await api(`/api/domain-automation/domains/${encodeURIComponent(domain)}/cloudflare`,{method:'POST'});await refresh()}catch(e){toast(e.message,true)}}
+    async function syncDomains(){try{const result=await api('/api/domain-automation/domains/sync',{method:'POST'});toast(`同步完成，新增 ${result.synced} 个域名`);await refresh()}catch(e){toast(e.message,true)}}
+    async function hostAllCloudflare(){const domains=overview.domains.filter(d=>d.cloudflare_status!=='active');if(!domains.length){toast('没有待托管域名');return}if(!confirm(`确认依次托管 ${domains.length} 个域名到 Cloudflare？`))return;for(const d of domains){toast('正在配置 '+d.domain);try{await api(`/api/domain-automation/domains/${encodeURIComponent(d.domain)}/cloudflare`,{method:'POST'})}catch(e){toast(`${d.domain}: ${e.message}`,true)}}await refresh()}
+    async function addSubscription(){try{const autoCloudflare=document.getElementById('sub-auto-cloudflare').checked;await api('/api/domain-automation/subscriptions',{method:'POST',body:JSON.stringify({name:document.getElementById('sub-name').value,prefix:document.getElementById('sub-prefix').value,suffix:document.getElementById('sub-suffix').value,slot_type:document.getElementById('sub-slot').value,random_length:Number(document.getElementById('sub-length').value),separator:document.getElementById('sub-separator').value,auto_cloudflare:autoCloudflare,nameservers:autoCloudflare?[]:[document.getElementById('sub-ns1').value,document.getElementById('sub-ns2').value]})});toast('前缀订阅已创建');await refresh()}catch(e){toast(e.message,true)}}
     async function deleteSubscription(id){if(!confirm('确认删除这个前缀订阅？'))return;try{await api(`/api/domain-automation/subscriptions/${id}`,{method:'DELETE'});await refresh()}catch(e){toast(e.message,true)}}
     async function startJob(){const button=document.getElementById('start-job');button.disabled=true;try{const job=await api('/api/domain-automation/jobs',{method:'POST',body:JSON.stringify({subscription_id:document.getElementById('job-subscription').value,target_count:Number(document.getElementById('job-count').value),max_attempts:Number(document.getElementById('job-attempts').value)})});toast('任务已启动：'+job.id);await refresh()}catch(e){toast(e.message,true)}finally{button.disabled=false}}
     refresh();setInterval(refresh,3000);
