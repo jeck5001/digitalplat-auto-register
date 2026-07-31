@@ -3,11 +3,16 @@ name: digitalplat-register
 services:
   register:
     image: ${IMAGE:?Set IMAGE in .env}
+    platform: linux/amd64
     pull_policy: always
     init: true
     shm_size: 1gb
-    restart: "no"
+    restart: unless-stopped
+    ports:
+      - "8400:8400"
     environment:
+      REFERRAL_CODE: ${REFERRAL_CODE:-4qn8iw8r1o}
+      JOBS_PATH: /app/data/jobs.json
       TURNSTILE_SOLVER_TYPE: remote
       TURNSTILE_REMOTE_ENDPOINT: ${TURNSTILE_REMOTE_ENDPOINT:?Set TURNSTILE_REMOTE_ENDPOINT in .env}
       TURNSTILE_TIMEOUT: ${TURNSTILE_TIMEOUT:-120}
@@ -23,7 +28,15 @@ services:
       PROXY_SERVER: ${PROXY_SERVER:-}
       PROXY_USERNAME: ${PROXY_USERNAME:-}
       PROXY_PASSWORD: ${PROXY_PASSWORD:-}
-    command:
-      - single
-      - --referral-code
-      - ${REFERRAL_CODE:-}
+    command: ["digitalplat-register-web", "--host", "0.0.0.0", "--port", "8400"]
+    volumes:
+      - digitalplat-register-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8400/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  digitalplat-register-data:
