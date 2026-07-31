@@ -912,6 +912,147 @@ def create_app(
         account.metadata["current_step"] = None
         await account_store.save()
 
+    # ==================== Domain Registration ====================
+
+    @app.get("/api/domains")
+    async def list_domains() -> Dict[str, Any]:
+        """List registered domains from all active accounts."""
+        accounts = account_store.get_accounts_by_status(AccountStatus.ACTIVE)
+        domains = []
+        for account in accounts:
+            account_domains = account.metadata.get("domains", [])
+            for domain in account_domains:
+                domains.append({
+                    "username": account.username,
+                    "domain": domain.get("domain"),
+                    "registered_at": domain.get("registered_at"),
+                    "nameservers": domain.get("nameservers", []),
+                })
+        return {"total": len(domains), "domains": domains}
+
+    @app.post("/api/domains/register")
+    async def register_domain(request: Dict[str, Any]) -> Dict[str, Any]:
+        """Register a new domain using DigitalPlat account credentials."""
+        from .services.domain_registrar import (
+            DomainRegistrar, DomainRegistrationConfig, register_domain_with_defaults
+        )
+        
+        username = request.get("username")
+        password = request.get("password")
+        domain_prefix = request.get("domain_prefix")
+        domain_suffix = request.get("domain_suffix", "dpdns.org")
+        nameservers = request.get("nameservers")
+        proxy = request.get("proxy")
+        
+        if not username or not domain_prefix:
+            raise HTTPException(
+                status_code=400, 
+                detail="username and domain_prefix are required"
+            )
+        
+        # Auto-lookup password from AccountStore if not provided
+        if not password:
+            accounts = account_store.get_accounts_by_status(AccountStatus.ACTIVE)
+            for account in accounts:
+                if account.username == username:
+                    password = account.password
+                    break
+            if not password:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Account '{username}' not found or has no saved password"
+                )
+        
+        # Run registration asynchronously - return task ID immediately
+        result = await register_domain_with_defaults(
+            username=username,
+            password=password,
+            domain_prefix=domain_prefix,
+            domain_suffix=domain_suffix,
+            nameservers=nameservers,
+            proxy=proxy,
+        )
+        
+        # If successful, store domain info in account metadata
+        if result.success:
+            accounts = account_store.get_accounts_by_status(AccountStatus.ACTIVE)
+            for account in accounts:
+                if account.username == username:
+                    if "domains" not in account.metadata:
+                        account.metadata["domains"] = []
+                    account.metadata["domains"].append({
+                        "domain": f"{domain_prefix}.{domain_suffix}",
+                        "registered_at": result.registered_at,
+                        "nameservers": result.nameservers,
+                    })
+                    await account_store.save()
+                    break
+        
+        return {
+            "success": result.success,
+            "domain": result.domain,
+            "message": result.message,
+            "steps": result.steps,
+            "error": result.error,
+        }
+
+    @app.post("/api/domains/check")
+    async def check_domain(request: Dict[str, Any]) -> Dict[str, Any]:
+        """Check domain availability without registering."""
+        from .services.domain_registrar import DomainRegistrar, DomainRegistrationConfig
+        
+        username = request.get("username")
+        password = request.get("password")
+        domain_prefix = request.get("domain_prefix")
+        domain_suffix = request.get("domain_suffix", "dpdns.org")
+        
+        if not username or not domain_prefix:
+            raise HTTPException(
+                status_code=400, 
+                detail="username and domain_prefix are required"
+            )
+        
+        # Auto-lookup password from AccountStore if not provided
+        if not password:
+            accounts = account_store.get_accounts_by_status(AccountStatus.ACTIVE)
+            for account in accounts:
+                if account.username == username:
+                    password = account.password
+                    break
+            if not password:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Account '{username}' not found or has no saved password"
+                )
+        
+        config = DomainRegistrationConfig(
+            username=username,
+            password=password,
+            domain_prefix=domain_prefix,
+            domain_suffix=domain_suffix,
+        )
+        
+        registrar = DomainRegistrar(config)
+        await registrar._init_browser(headless=True)
+        
+        try:
+            login_result = await registrar.login()
+            if not login_result.success:
+                return {
+                    "available": False,
+                    "domain": f"{domain_prefix}.{domain_suffix}",
+                    "message": f"Login failed: {login_result.error}"
+                }
+            
+            check_result = await registrar.check_domain_availability()
+            return {
+                "available": check_result.available,
+                "domain": check_result.domain,
+                "message": check_result.message,
+            }
+        finally:
+            await registrar._close_browser()
+
     return app
 
 
@@ -1111,6 +1252,7 @@ DASHBOARD_HTML = """<!doctype html>
       <button class="active" onclick="showTab('dashboard', this)">📊 概览</button>
       <button onclick="showTab('batch', this)">🚀 批量注册</button>
       <button onclick="showTab('accounts', this)">👤 账号管理</button>
+      <button onclick="showTab('domains', this)">🌐 域名注册</button>
       <button onclick="showTab('history', this)">📜 任务记录</button>
     </nav>
 
@@ -1260,6 +1402,63 @@ DASHBOARD_HTML = """<!doctype html>
         </div>
       </div>
     </div>
+
+    <!-- Domain Registration Tab -->
+    <div id="tab-domains" class="tab-content">
+      <div class="card">
+        <div class="card-header">注册免费域名 (DigitalPlat)</div>
+        <div class="card-body">
+          <p class="hint" style="margin-bottom:16px">
+            支持 .dpdns.org / .us.kg / .xx.kg / .qzz.io / .qd.je 等免费后缀。每个账号限注册1个免费域名。
+          </p>
+          <div class="grid-2">
+            <div>
+              <label>选择账号 *</label>
+              <select id="domain-account">
+                <option value="">-- 选择已注册的账号 --</option>
+              </select>
+            </div>
+            <div>
+              <label>域名后缀</label>
+              <select id="domain-suffix">
+                <option value="dpdns.org">.dpdns.org (推荐)</option>
+                <option value="us.kg">.us.kg ($3一次性)</option>
+                <option value="xx.kg">.xx.kg ($3一次性)</option>
+                <option value="qzz.io">.qzz.io</option>
+                <option value="qd.je">.qd.je</option>
+              </select>
+            </div>
+            <div>
+              <label>域名前缀 *</label>
+              <input type="text" id="domain-prefix" placeholder="例如: mysite">
+            </div>
+            <div>
+              <label>Nameserver 1</label>
+              <input type="text" id="domain-ns1" value="ns1.cloudflare.com">
+            </div>
+            <div>
+              <label>Nameserver 2</label>
+              <input type="text" id="domain-ns2" value="ns2.cloudflare.com">
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;margin-top:16px">
+            <button class="btn" id="check-domain-btn" onclick="checkDomain()">检查可用性</button>
+            <button class="btn" id="register-domain-btn" onclick="registerDomain()">注册域名</button>
+          </div>
+          <div id="domain-result" style="margin-top:12px"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:20px">
+        <div class="card-header">已注册域名</div>
+        <div class="card-body">
+          <table id="domains-table">
+            <thead><tr><th>域名</th><th>账号</th><th>注册时间</th><th>Nameservers</th></tr></thead>
+            <tbody><tr><td colspan="4" class="hint">加载中...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   </main>
 
   <!-- Add Account Modal -->
@@ -1303,6 +1502,7 @@ DASHBOARD_HTML = """<!doctype html>
       refresh();
       if (tabName === 'accounts') loadAccounts();
       if (tabName === 'batch') loadAccounts();
+      if (tabName === 'domains') loadDomains();
     }
     
     function statusBadge(status) {
@@ -1786,6 +1986,139 @@ DASHBOARD_HTML = """<!doctype html>
       clearTimeout(searchTimeout);
       searchTimeout = setTimeout(loadAccounts, 300);
     });
+    
+    // ==================== Domain Functions ====================
+    
+    async function loadDomainAccounts() {
+      // Load active accounts into domain account selector
+      try {
+        const response = await fetch('/api/accounts?status=active&limit=100');
+        const data = await response.json();
+        const select = document.getElementById('domain-account');
+        select.innerHTML = '<option value="">-- 选择已注册的账号 --</option>';
+        if (data.accounts) {
+          for (const account of data.accounts) {
+            const option = document.createElement('option');
+            option.value = account.username;
+            option.textContent = `${account.username} (${account.email || '无邮箱'})`;
+            option.dataset.password = account.password || '';
+            select.appendChild(option);
+          }
+        }
+      } catch (e) {
+        console.error('Failed to load accounts:', e);
+      }
+    }
+    
+    async function loadDomains() {
+      // Load account dropdown
+      await loadDomainAccounts();
+      
+      // Load registered domains table
+      try {
+        const response = await fetch('/api/domains');
+        const data = await response.json();
+        const tbody = document.querySelector('#domains-table tbody');
+        if (!data.domains || !data.domains.length) {
+          tbody.innerHTML = '<tr><td colspan="4" class="hint">暂无域名</td></tr>';
+          return;
+        }
+        tbody.innerHTML = data.domains.map(d => 
+          `<tr>
+            <td><strong>${d.domain}</strong></td>
+            <td>${d.username}</td>
+            <td>${d.registered_at || '-'}</td>
+            <td style="font-size:12px">${(d.nameservers || []).join('<br>')}</td>
+          </tr>`
+        ).join('');
+      } catch (e) {
+        const tbody = document.querySelector('#domains-table tbody');
+        tbody.innerHTML = '<tr><td colspan="4" class="hint">加载失败</td></tr>';
+      }
+    }
+    
+    async function checkDomain() {
+      const accountSelect = document.getElementById('domain-account');
+      const username = accountSelect.value;
+      const password = accountSelect.options[accountSelect.selectedIndex]?.dataset.password || '';
+      const prefix = document.getElementById('domain-prefix').value.trim();
+      const suffix = document.getElementById('domain-suffix').value;
+      const resultDiv = document.getElementById('domain-result');
+      
+      if (!username || !prefix) {
+        showToast('请选择账号并输入域名前缀', 'error');
+        return;
+      }
+      
+      document.getElementById('check-domain-btn').disabled = true;
+      resultDiv.innerHTML = '<p class="hint">⏳ 检查中...</p>';
+      
+      try {
+        const response = await fetch('/api/domains/check', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({username, password, domain_prefix: prefix, domain_suffix: suffix})
+        });
+        const data = await response.json();
+        if (data.available) {
+          resultDiv.innerHTML = `<p style="color:var(--green)">✓ ${data.domain} 可注册!</p>`;
+        } else {
+          resultDiv.innerHTML = `<p style="color:var(--amber)">✗ ${data.domain} 不可用 - ${data.message}</p>`;
+        }
+      } catch (e) {
+        resultDiv.innerHTML = `<p style="color:var(--red)">错误: ${e.message}</p>`;
+      } finally {
+        document.getElementById('check-domain-btn').disabled = false;
+      }
+    }
+    
+    async function registerDomain() {
+      const accountSelect = document.getElementById('domain-account');
+      const username = accountSelect.value;
+      const password = accountSelect.options[accountSelect.selectedIndex]?.dataset.password || '';
+      const prefix = document.getElementById('domain-prefix').value.trim();
+      const suffix = document.getElementById('domain-suffix').value;
+      const ns1 = document.getElementById('domain-ns1').value.trim() || 'ns1.cloudflare.com';
+      const ns2 = document.getElementById('domain-ns2').value.trim() || 'ns2.cloudflare.com';
+      const resultDiv = document.getElementById('domain-result');
+      
+      if (!username || !prefix) {
+        showToast('请选择账号并输入域名前缀', 'error');
+        return;
+      }
+      
+      if (!confirm(`确认注册 ${prefix}.${suffix} ?`)) return;
+      
+      document.getElementById('register-domain-btn').disabled = true;
+      resultDiv.innerHTML = '<p class="hint">⏳ 注册中...可能需要 30-60 秒</p>';
+      
+      try {
+        const response = await fetch('/api/domains/register', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            username, password, 
+            domain_prefix: prefix, 
+            domain_suffix: suffix,
+            nameservers: [ns1, ns2]
+          })
+        });
+        const data = await response.json();
+        if (data.success) {
+          resultDiv.innerHTML = `<p style="color:var(--green)">✓ 注册成功! ${data.domain}</p>`;
+          showToast(`✓ 域名注册成功: ${data.domain}`);
+          loadDomains();
+        } else {
+          resultDiv.innerHTML = `<p style="color:var(--red)">注册失败: ${data.error || data.message}</p>`;
+          showToast('✗ 注册失败: ' + (data.error || data.message), 'error');
+        }
+      } catch (e) {
+        resultDiv.innerHTML = `<p style="color:var(--red)">错误: ${e.message}</p>`;
+        showToast('✗ 错误: ' + e.message, 'error');
+      } finally {
+        document.getElementById('register-domain-btn').disabled = false;
+      }
+    }
     
     // Initial load and auto-refresh
     refresh();
