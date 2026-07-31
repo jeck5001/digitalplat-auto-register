@@ -60,18 +60,54 @@ def test_batch_detail_exposes_all_account_registration_steps(tmp_path):
     )
 
 
-def test_legacy_account_progress_renderer_is_kept_for_api_compatibility(tmp_path):
+def test_original_console_and_new_domain_module_have_separate_routes(tmp_path):
     store = AccountStore(tmp_path / "accounts.json")
     manager = web_app.RegistrationManager(store, tmp_path / "jobs.json")
 
     with TestClient(web_app.create_app(manager, store)) as client:
-        response = client.get("/")
+        original_console = client.get("/")
+        domain_console = client.get("/domain-automation")
+
+    assert original_console.status_code == 200
+    assert "DigitalPlat 控制台" in original_console.text
+    assert "批量注册" in original_console.text
+    assert "账号管理" in original_console.text
+    assert "账号域名注册" in original_console.text
+    assert 'href="/domain-automation"' in original_console.text
+    assert "function accountProgressRow" in original_console.text
+    assert "function stepTimeline" in original_console.text
+
+    assert domain_console.status_code == 200
+    assert "DigitalPlat 域名自动注册" in domain_console.text
+    assert "前缀订阅" in domain_console.text
+    assert 'href="/"' in domain_console.text
+
+
+def test_original_account_domain_routes_are_kept(tmp_path):
+    store = AccountStore(tmp_path / "accounts.json")
+    account = Account(
+        username="domain-owner",
+        email="owner@example.test",
+        password="secret",
+        status=AccountStatus.ACTIVE,
+    )
+    account.metadata["domains"] = [{
+        "domain": "existing.dpdns.org",
+        "registered_at": "2026-07-31T12:00:00+08:00",
+        "nameservers": ["ns1.example.test", "ns2.example.test"],
+    }]
+    store.create_account(account)
+    manager = web_app.RegistrationManager(store, tmp_path / "jobs.json")
+
+    with TestClient(web_app.create_app(manager, store)) as client:
+        response = client.get("/api/domains")
+        invalid_check = client.post("/api/domains/check", json={})
+        invalid_registration = client.post("/api/domains/register", json={})
 
     assert response.status_code == 200
-    assert "DigitalPlat 域名自动注册" in response.text
-    assert "前缀订阅" in response.text
-    assert "function accountProgressRow" in web_app.DASHBOARD_HTML
-    assert "function stepTimeline" in web_app.DASHBOARD_HTML
+    assert response.json()["domains"][0]["domain"] == "existing.dpdns.org"
+    assert invalid_check.status_code == 400
+    assert invalid_registration.status_code == 400
 
 
 def test_batch_counts_accounts_only_after_registration_finishes(tmp_path, monkeypatch):
