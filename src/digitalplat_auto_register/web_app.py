@@ -1067,23 +1067,28 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
     
-    function renderRecentAccounts(data) {
+    async function renderRecentAccounts(data) {
       // Load from accounts API
-      fetch('/api/accounts?limit=5').then(r => r.json()).then(result => {
+      try {
+        const r = await fetch('/api/accounts?limit=5');
+        const result = await r.json();
         const tbody = document.querySelector('#recent-accounts-table tbody');
-        if (!result.accounts.length) {
+        if (!result.accounts || !result.accounts.length) {
           tbody.innerHTML = '<tr><td colspan="3" class="hint">暂无账号</td></tr>';
           return;
         }
         tbody.innerHTML = result.accounts.map(a => 
           `<tr><td>${a.username}</td><td>${a.email || '-'}</td><td>${statusBadge(a.status)}</td></tr>`
         ).join('');
-      });
+      } catch (e) {
+        const tbody = document.querySelector('#recent-accounts-table tbody');
+        tbody.innerHTML = '<tr><td colspan="3" class="hint">加载失败</td></tr>';
+      }
     }
     
     function renderBatches(batches) {
       const tbody = document.querySelector('#batch-history-table tbody');
-      if (!batches.length) {
+      if (!batches || !batches.length) {
         tbody.innerHTML = '<tr><td colspan="8" class="hint">暂无批量任务</td></tr>';
         return;
       }
@@ -1119,7 +1124,7 @@ DASHBOARD_HTML = """<!doctype html>
     
     function renderJobs(jobs) {
       const tbody = document.querySelector('#history-table tbody');
-      if (!jobs.length) {
+      if (!jobs || !jobs.length) {
         tbody.innerHTML = '<tr><td colspan="6" class="hint">暂无记录</td></tr>';
         return;
       }
@@ -1233,13 +1238,19 @@ DASHBOARD_HTML = """<!doctype html>
       if (status) url += 'status=' + status + '&';
       if (search) url = '/api/accounts/search?q=' + encodeURIComponent(search);
       
-      const response = await fetch(url);
-      const data = await response.json();
-      const tbody = document.querySelector('#accounts-table tbody');
-      if (!data.accounts.length) {
-        tbody.innerHTML = '<tr><td colspan="7" class="hint">暂无账号</td></tr>';
-        return;
-      }
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          const tbody = document.querySelector('#accounts-table tbody');
+          tbody.innerHTML = '<tr><td colspan="7" class="hint">API错误: ' + response.status + '</td></tr>';
+          return;
+        }
+        const data = await response.json();
+        const tbody = document.querySelector('#accounts-table tbody');
+        if (!data.accounts || !data.accounts.length) {
+          tbody.innerHTML = '<tr><td colspan="7" class="hint">暂无账号</td></tr>';
+          return;
+        }
       tbody.innerHTML = data.accounts.map(a => 
         `<tr>
           <td><input type="checkbox" class="account-checkbox" value="${a.id}"></td>
@@ -1257,6 +1268,10 @@ DASHBOARD_HTML = """<!doctype html>
           </td>
         </tr>`
       ).join('');
+      } catch (e) {
+        const tbody = document.querySelector('#accounts-table tbody');
+        tbody.innerHTML = '<tr><td colspan="7" class="hint">加载失败: ' + e.message + '</td></tr>';
+      }
     }
     
     function toggleSelectAll() {
