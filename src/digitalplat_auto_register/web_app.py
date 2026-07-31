@@ -478,12 +478,16 @@ def create_app(
         if not job:
             raise HTTPException(status_code=404, detail="Batch job not found")
         
-        # Include account details
+        # Include account details with password for active accounts
         accounts = []
         for aid in job.account_ids:
             account = account_store.get_account(aid)
             if account:
-                accounts.append(account.to_safe_dict())
+                # Include password for active accounts so users can use them
+                if account.status == AccountStatus.ACTIVE:
+                    accounts.append(account.to_dict())
+                else:
+                    accounts.append(account.to_safe_dict())
         
         return {
             **job.to_dict(),
@@ -983,6 +987,8 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById('tab-' + tabName).classList.add('active');
       btn.classList.add('active');
       refresh();
+      if (tabName === 'accounts') loadAccounts();
+      if (tabName === 'batch') loadAccounts();
     }
     
     function statusBadge(status) {
@@ -1014,6 +1020,12 @@ DASHBOARD_HTML = """<!doctype html>
         renderRecentAccounts(data);
         renderBatches(data.batch_jobs || []);
         renderJobs(data.jobs || []);
+        
+        // Auto-refresh accounts list if on accounts tab
+        const accountsTab = document.getElementById('tab-accounts');
+        if (accountsTab && accountsTab.classList.contains('active')) {
+          loadAccounts();
+        }
       } catch (error) {
         document.getElementById('updated').textContent = '服务暂不可用';
       }
@@ -1122,8 +1134,27 @@ DASHBOARD_HTML = """<!doctype html>
     async function viewBatch(batchId) {
       const response = await fetch('/api/batch/' + batchId);
       const data = await response.json();
-      // Show batch details in modal or expand
-      console.log('Batch details:', data);
+      if (!response.ok) {
+        alert('加载失败: ' + (data.detail || '未知错误'));
+        return;
+      }
+      const accountsHtml = data.accounts?.map(a => 
+        `<li>${a.username} - ${a.email || '无邮箱'} - ${a.status}${a.password && a.status === 'active' ? ' - 密码: ' + a.password : ''}</li>`).join('') || '<li>无账号</li>';
+      document.getElementById('account-detail-content').innerHTML = `
+        <p><strong>任务ID:</strong> ${data.id}</p>
+        <p><strong>状态:</strong> ${data.status}</p>
+        <p><strong>总数:</strong> ${data.total_accounts}</p>
+        <p><strong>完成:</strong> ${data.completed_accounts}</p>
+        <p><strong>成功:</strong> ${data.successful_accounts}</p>
+        <p><strong>失败:</strong> ${data.failed_accounts}</p>
+        <p><strong>创建时间:</strong> ${data.created_at}</p>
+        ${data.error ? `<p style="color:var(--red)"><strong>错误:</strong> ${data.error}</p>` : ''}
+        <details style="margin-top:12px">
+          <summary>账号列表 (${data.accounts?.length || 0})</summary>
+          <ul style="margin-top:8px;padding-left:20px;font-size:13px">${accountsHtml}</ul>
+        </details>
+      `;
+      document.getElementById('account-detail-modal').classList.add('active');
     }
     
     // Account management
@@ -1168,8 +1199,21 @@ DASHBOARD_HTML = """<!doctype html>
     async function viewAccount(accountId) {
       const response = await fetch('/api/accounts/' + accountId);
       const data = await response.json();
-      document.getElementById('account-detail-content').innerHTML = 
-        Object.entries(data).map(([k,v]) => `<p><strong>${k}:</strong> ${Array.isArray(v) ? JSON.stringify(v) : (v || '-')}</p>`).join('');
+      if (!response.ok) {
+        alert('加载失败: ' + (data.detail || '未知错误'));
+        return;
+      }
+      // Format the detail view with password highlighted for active accounts
+      let html = '';
+      const fieldOrder = ['id', 'username', 'email', 'password', 'status', 'referral_code', 'fullname', 'phone', 'address_line1', 'city', 'state', 'postal_code', 'country', 'registered_at', 'created_at', 'error'];
+      for (const key of fieldOrder) {
+        if (data[key] !== undefined && data[key] !== null) {
+          const isPassword = key === 'password' && data.status === 'active';
+          const value = Array.isArray(data[key]) ? JSON.stringify(data[key]) : (data[key] || '-');
+          html += `<p${isPassword ? ' style="background:#def3e8;padding:4px 8px;border-radius:4px"' : ''}><strong>${key}:</strong> ${value}</p>`;
+        }
+      }
+      document.getElementById('account-detail-content').innerHTML = html;
       document.getElementById('account-detail-modal').classList.add('active');
     }
     
@@ -1275,6 +1319,7 @@ DASHBOARD_HTML = """<!doctype html>
     
     // Initial load and auto-refresh
     refresh();
+    loadAccounts();
     setInterval(refresh, 3000);
   </script>
 </body>
