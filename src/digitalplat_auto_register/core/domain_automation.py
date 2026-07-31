@@ -20,6 +20,10 @@ import requests
 
 DEFAULT_API_BASE = "https://domain-api.digitalplat.org/api/v1"
 DEFAULT_DATA_PATH = "/app/data/domain-automation.json"
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+)
 TOKEN_PATTERN = re.compile(r"^dp_(?:live|test)_[A-Za-z0-9_-]+$")
 LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 HOSTNAME_PATTERN = re.compile(
@@ -88,9 +92,11 @@ class DigitalPlatDomainClient:
         self.timeout = timeout
         self.headers = {
             "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
+            "Accept": "application/json, text/plain, */*",
             "Content-Type": "application/json",
-            "User-Agent": "digitalplat-auto-register/2.0",
+            # Cloudflare challenges non-browser User-Agents before the API
+            # receives the bearer token, returning an HTML 403 page.
+            "User-Agent": DEFAULT_USER_AGENT,
         }
 
     def _request(
@@ -117,8 +123,17 @@ class DigitalPlatDomainClient:
         try:
             body = response.json() if response.content else {}
         except ValueError as error:
+            server = str(response.headers.get("server", "")).lower()
+            challenge = response.status_code == 403 and (
+                "cloudflare" in server or "challenge page" in response.text.lower()
+            )
+            message = (
+                "DigitalPlat API request was blocked by a Cloudflare challenge"
+                if challenge
+                else f"DigitalPlat returned HTTP {response.status_code} with non-JSON content"
+            )
             raise DigitalPlatAPIError(
-                f"DigitalPlat returned HTTP {response.status_code} with non-JSON content",
+                message,
                 status_code=response.status_code,
                 ambiguous=mutation and response.status_code >= 500,
             ) from error

@@ -5,7 +5,9 @@ from fastapi.testclient import TestClient
 from digitalplat_auto_register.core.account import AccountStore
 from digitalplat_auto_register.core.domain_automation import (
     APITokenRecord,
+    DEFAULT_USER_AGENT,
     DigitalPlatAPIError,
+    DigitalPlatDomainClient,
     DomainAutomationManager,
     DomainAutomationStore,
     PrefixSubscription,
@@ -138,3 +140,10 @@ def test_token_and_subscription_validation():
     })
     assert subscription["suffix"] == "us.kg"
     assert subscription["slot_type"] == "subscription"
+
+
+def test_api_client_uses_browser_compatible_headers():
+    client = DigitalPlatDomainClient("dp_test_example_123456")
+
+    assert client.headers["User-Agent"] == DEFAULT_USER_AGENT
+    assert client.headers["Accept"] == "application/json, text/plain, */*"
