@@ -164,6 +164,22 @@ class AccountStore:
         self._batch_jobs: Dict[str, BatchRegistrationJob] = {}
         self._loaded = False
     
+    def set_pool(self, pool) -> None:
+        """Set AccountPool reference for syncing"""
+        self._pool = pool
+    
+    def set_stats(self, stats) -> None:
+        """Set StatisticsCollector reference for recording"""
+        self._stats = stats
+    
+    @property
+    def pool(self):
+        return getattr(self, '_pool', None)
+    
+    @property
+    def statistics(self):
+        return getattr(self, '_stats', None)
+    
     async def load(self) -> None:
         """Load accounts and jobs from disk, cleaning up interrupted operations."""
         import asyncio
@@ -244,7 +260,28 @@ class AccountStore:
     def create_account(self, account: Account) -> Account:
         """Add a new account to the store."""
         self._accounts[account.id] = account
+        # Sync to pool if available (fire-and-forget)
+        if self.pool:
+            try:
+                from .account_pool import AccountPool
+                if isinstance(self.pool, AccountPool):
+                    profile = self._account_to_profile(account)
+                    self.pool.add_account(profile, tags=["legacy_sync"])
+            except Exception:
+                pass  # Don't fail creation if pool sync fails
         return account
+    
+    def _account_to_profile(self, account: 'Account'):
+        """Convert Account to UserProfile for pool sync"""
+        from ..types import UserProfile
+        return UserProfile(
+            username=account.username,
+            email=account.email,
+            password=account.password,
+            fullname=account.fullname or account.username,
+            phone=account.phone or "",
+            referral_code=account.referral_code or "",
+        )
     
     def get_account(self, account_id: str) -> Optional[Account]:
         """Get account by ID."""
