@@ -10,6 +10,7 @@ This module provides statistics tracking and aggregation including:
 """
 
 import json
+import os
 import sqlite3
 import time
 from datetime import datetime, timedelta
@@ -116,6 +117,11 @@ class StatisticsCollector:
     def _init_database(self) -> None:
         """Initialize SQLite database"""
         try:
+            # Ensure parent directory exists
+            db_dir = os.path.dirname(self.db_path)
+            if db_dir:
+                os.makedirs(db_dir, exist_ok=True)
+            
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS metrics (

@@ -167,6 +167,11 @@ class AccountPool:
     def _init_database(self) -> None:
         """Initialize SQLite database and create tables if not exists"""
         try:
+            # Ensure parent directory exists
+            db_dir = os.path.dirname(self.db_path)
+            if db_dir:
+                os.makedirs(db_dir, exist_ok=True)
+            
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS accounts (
