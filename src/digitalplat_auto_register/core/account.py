@@ -160,7 +160,7 @@ class AccountStore:
         self._loaded = False
     
     async def load(self) -> None:
-        """Load accounts and jobs from disk."""
+        """Load accounts and jobs from disk, cleaning up interrupted operations."""
         import asyncio
         if self._loaded:
             return
@@ -174,6 +174,10 @@ class AccountStore:
                 for raw in raw_accounts:
                     try:
                         account = Account.from_dict(raw)
+                        # Reset "registering" accounts that were interrupted on restart
+                        if account.status == AccountStatus.REGISTERING:
+                            account.status = AccountStatus.FAILED
+                            account.error = "Registration interrupted by service restart"
                         self._accounts[account.id] = account
                     except Exception as e:
                         logger.warning(f"Failed to load account: {e}")
@@ -183,6 +187,10 @@ class AccountStore:
                 for raw in raw_jobs:
                     try:
                         job = BatchRegistrationJob.from_dict(raw)
+                        # Clean up batch jobs that were interrupted
+                        if job.status == "running":
+                            job.status = "failed"
+                            job.error = "Batch job interrupted by service restart"
                         self._batch_jobs[job.id] = job
                     except Exception as e:
                         logger.warning(f"Failed to load batch job: {e}")
