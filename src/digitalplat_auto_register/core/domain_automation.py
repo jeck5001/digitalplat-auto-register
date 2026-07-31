@@ -19,6 +19,7 @@ import requests
 
 
 DEFAULT_API_BASE = "https://domain-api.digitalplat.org/api/v1"
+DEFAULT_CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4"
 DEFAULT_DATA_PATH = "/app/data/domain-automation.json"
 DEFAULT_SEPARATOR = ""
 DEFAULT_USER_AGENT = (
@@ -41,6 +42,18 @@ DOMAIN_STEP_LABELS = {
     "token_assignment": "分配 API Token",
     "registration_request": "提交注册请求",
     "registration_verification": "确认注册结果",
+}
+CLOUDFLARE_STEP_ORDER = (
+    "zone_provisioning",
+    "nameserver_assignment",
+    "digitalplat_delegation",
+    "cloudflare_activation",
+)
+CLOUDFLARE_STEP_LABELS = {
+    "zone_provisioning": "创建 Cloudflare Zone",
+    "nameserver_assignment": "获取专属 Nameservers",
+    "digitalplat_delegation": "更新 DigitalPlat Nameservers",
+    "cloudflare_activation": "确认 Cloudflare 托管状态",
 }
 
 
@@ -78,6 +91,118 @@ class DigitalPlatAPIError(RuntimeError):
         super().__init__(message)
         self.status_code = status_code
         self.ambiguous = ambiguous
+
+
+class CloudflareAPIError(RuntimeError):
+    """A safe Cloudflare API failure that never contains credentials."""
+
+    def __init__(self, message: str, status_code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class CloudflareClient:
+    """Minimal client for Cloudflare Zone provisioning and status checks."""
+
+    def __init__(
+        self,
+        api_token: str,
+        account_id: str,
+        api_base: str = DEFAULT_CLOUDFLARE_API_BASE,
+        timeout: float = 30.0,
+    ) -> None:
+        self.account_id = account_id
+        self.api_base = api_base.rstrip("/")
+        self.timeout = timeout
+        self.headers = {
+            "Authorization": f"Bearer {api_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": DEFAULT_USER_AGENT,
+        }
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        try:
+            response = requests.request(
+                method,
+                f"{self.api_base}{path}",
+                headers=self.headers,
+                json=payload,
+                params=params,
+                timeout=self.timeout,
+            )
+        except requests.RequestException as error:
+            raise CloudflareAPIError(
+                f"Cloudflare network error: {error.__class__.__name__}"
+            ) from error
+
+        try:
+            body = response.json() if response.content else {}
+        except ValueError as error:
+            raise CloudflareAPIError(
+                f"Cloudflare returned HTTP {response.status_code} with non-JSON content",
+                response.status_code,
+            ) from error
+
+        if not response.ok or not isinstance(body, dict) or body.get("success") is not True:
+            errors = body.get("errors", []) if isinstance(body, dict) else []
+            messages = [
+                str(item.get("message"))
+                for item in errors
+                if isinstance(item, dict) and item.get("message")
+            ]
+            message = "; ".join(messages) or f"HTTP {response.status_code}"
+            raise CloudflareAPIError(
+                f"Cloudflare API error: {_safe_error(message)}",
+                response.status_code,
+            )
+        return body.get("result")
+
+    def verify_token(self) -> Dict[str, Any]:
+        result = self._request("GET", "/user/tokens/verify")
+        if not isinstance(result, dict):
+            raise CloudflareAPIError("Cloudflare token verification returned an unexpected shape")
+        return result
+
+    def find_zone(self, domain: str) -> Optional[Dict[str, Any]]:
+        result = self._request(
+            "GET",
+            "/zones",
+            params={"name": domain, "account.id": self.account_id, "per_page": 50},
+        )
+        if not isinstance(result, list):
+            raise CloudflareAPIError("Cloudflare zone list returned an unexpected shape")
+        for zone in result:
+            if isinstance(zone, dict) and str(zone.get("name", "")).lower() == domain.lower():
+                return zone
+        return None
+
+    def create_zone(self, domain: str) -> Dict[str, Any]:
+        result = self._request(
+            "POST",
+            "/zones",
+            {
+                "name": domain,
+                "account": {"id": self.account_id},
+                "type": "full",
+                "jump_start": False,
+            },
+        )
+        if not isinstance(result, dict):
+            raise CloudflareAPIError("Cloudflare zone creation returned an unexpected shape")
+        return result
+
+    def get_zone(self, zone_id: str) -> Dict[str, Any]:
+        result = self._request("GET", f"/zones/{quote(zone_id, safe='')}")
+        if not isinstance(result, dict):
+            raise CloudflareAPIError("Cloudflare zone status returned an unexpected shape")
+        return result
 
 
 class DigitalPlatDomainClient:
@@ -229,12 +354,35 @@ class PrefixSubscription:
     slot_type: str = "subscription"
     random_length: int = 6
     separator: str = DEFAULT_SEPARATOR
+    auto_cloudflare: bool = False
     enabled: bool = True
     id: str = field(default_factory=lambda: uuid4().hex[:12])
     created_at: str = field(default_factory=_timestamp)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class CloudflareSettings:
+    account_id: str
+    api_token: str
+    id: str = field(default_factory=lambda: uuid4().hex[:12])
+    enabled: bool = True
+    last_checked_at: Optional[str] = None
+    last_status: str = "untested"
+    last_error: Optional[str] = None
+
+    def safe_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "account_id": self.account_id,
+            "token_masked": _mask_token(self.api_token),
+            "enabled": self.enabled,
+            "last_checked_at": self.last_checked_at,
+            "last_status": self.last_status,
+            "last_error": _safe_error(self.last_error),
+        }
 
 
 @dataclass
@@ -286,6 +434,7 @@ class DomainAutomationStore:
         self.subscriptions: Dict[str, PrefixSubscription] = {}
         self.jobs: Dict[str, DomainRegistrationJob] = {}
         self.domains: List[Dict[str, Any]] = []
+        self.cloudflare: Optional[CloudflareSettings] = None
         self.loaded = False
 
     async def load(self) -> None:
@@ -310,6 +459,12 @@ class DomainAutomationStore:
                 if key in PrefixSubscription.__dataclass_fields__
             })
             self.subscriptions[subscription.id] = subscription
+        raw_cloudflare = payload.get("cloudflare")
+        if isinstance(raw_cloudflare, dict) and raw_cloudflare.get("api_token") and raw_cloudflare.get("account_id"):
+            self.cloudflare = CloudflareSettings(**{
+                key: value for key, value in raw_cloudflare.items()
+                if key in CloudflareSettings.__dataclass_fields__
+            })
         for raw in payload.get("jobs", []):
             attempts = [DomainAttempt(**attempt) for attempt in raw.pop("attempts", [])]
             job = DomainRegistrationJob(**{
@@ -332,6 +487,7 @@ class DomainAutomationStore:
             "subscriptions": [item.to_dict() for item in self.subscriptions.values()],
             "jobs": [item.to_dict() for item in self.jobs.values()],
             "domains": self.domains,
+            "cloudflare": asdict(self.cloudflare) if self.cloudflare else None,
             "saved_at": _timestamp(),
         }
         fd, temporary_path = tempfile.mkstemp(
@@ -361,11 +517,16 @@ class DomainAutomationManager:
         self,
         store: DomainAutomationStore,
         client_factory: Callable[..., DigitalPlatDomainClient] = DigitalPlatDomainClient,
+        cloudflare_client_factory: Callable[..., CloudflareClient] = CloudflareClient,
     ) -> None:
         self.store = store
         self.client_factory = client_factory
+        self.cloudflare_client_factory = cloudflare_client_factory
         self.tasks: Dict[str, asyncio.Task] = {}
         self.api_base = os.getenv("DIGITALPLAT_API_BASE", DEFAULT_API_BASE)
+        self.cloudflare_api_base = os.getenv(
+            "CLOUDFLARE_API_BASE", DEFAULT_CLOUDFLARE_API_BASE
+        )
 
     @staticmethod
     def validate_token(token: str) -> str:
@@ -375,12 +536,146 @@ class DomainAutomationManager:
         return value
 
     @staticmethod
+    def normalize_cloudflare_settings(request: Dict[str, Any]) -> Dict[str, str]:
+        account_id = str(request.get("account_id", "")).strip()
+        api_token = str(request.get("api_token", "")).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", account_id):
+            raise ValueError("Cloudflare Account ID is invalid")
+        if len(api_token) < 20 or any(character.isspace() for character in api_token):
+            raise ValueError("Cloudflare API Token is invalid")
+        return {"account_id": account_id, "api_token": api_token}
+
+    def _cloudflare_client(self) -> CloudflareClient:
+        settings = self.store.cloudflare
+        if not settings or not settings.enabled:
+            raise ValueError("Cloudflare configuration is missing or disabled")
+        return self.cloudflare_client_factory(
+            settings.api_token,
+            settings.account_id,
+            self.cloudflare_api_base,
+        )
+
+    async def test_cloudflare(self) -> Dict[str, Any]:
+        settings = self.store.cloudflare
+        if not settings:
+            raise ValueError("Cloudflare configuration is missing")
+        try:
+            await _run_sync(self._cloudflare_client().verify_token)
+            settings.last_status = "valid"
+            settings.last_error = None
+        except CloudflareAPIError as error:
+            settings.last_status = "invalid"
+            settings.last_error = _safe_error(error)
+        settings.last_checked_at = _timestamp()
+        await self.store.save()
+        return settings.safe_dict()
+
+    @staticmethod
+    def _cloudflare_step(name: str, status: str, message: str) -> Dict[str, Any]:
+        return {
+            "name": name,
+            "label": CLOUDFLARE_STEP_LABELS[name],
+            "status": status,
+            "message": message,
+            "timestamp": _timestamp(),
+        }
+
+    def _domain_record(self, domain: str) -> Dict[str, Any]:
+        normalized = str(domain or "").strip().lower().rstrip(".")
+        for record in self.store.domains:
+            if str(record.get("domain", "")).lower() == normalized:
+                return record
+        raise ValueError("Registered domain was not found in local automation history")
+
+    async def host_domain_on_cloudflare(self, domain: str) -> Dict[str, Any]:
+        record = self._domain_record(domain)
+        token = self.store.tokens.get(str(record.get("token_id", "")))
+        if not token:
+            raise ValueError("The DigitalPlat API Token for this domain is missing")
+
+        record["cloudflare_status"] = "running"
+        record["cloudflare_error"] = None
+        record["cloudflare_steps"] = []
+        await self.store.save()
+        cloudflare = self._cloudflare_client()
+        digitalplat = self.client_factory(token.token, self.api_base)
+
+        try:
+            record["cloudflare_steps"].append(
+                self._cloudflare_step("zone_provisioning", "running", "Checking Cloudflare Zone")
+            )
+            await self.store.save()
+            zone = await _run_sync(cloudflare.find_zone, record["domain"])
+            if zone:
+                record["cloudflare_steps"][-1] = self._cloudflare_step(
+                    "zone_provisioning", "success", "Existing Zone found"
+                )
+            else:
+                zone = await _run_sync(cloudflare.create_zone, record["domain"])
+                record["cloudflare_steps"][-1] = self._cloudflare_step(
+                    "zone_provisioning", "success", "Zone created"
+                )
+
+            zone_id = str(zone.get("id", ""))
+            nameservers = [
+                str(item).strip().lower().rstrip(".")
+                for item in zone.get("name_servers", [])
+                if str(item).strip()
+            ]
+            if not zone_id or len(nameservers) < 2 or any(
+                not HOSTNAME_PATTERN.fullmatch(item) for item in nameservers
+            ):
+                raise CloudflareAPIError("Cloudflare did not return two valid nameservers")
+            record["cloudflare_steps"].append(
+                self._cloudflare_step(
+                    "nameserver_assignment", "success", " · ".join(nameservers)
+                )
+            )
+            record["cloudflare_zone_id"] = zone_id
+            record["cloudflare_nameservers"] = nameservers
+            await self.store.save()
+
+            record["cloudflare_steps"].append(
+                self._cloudflare_step(
+                    "digitalplat_delegation", "running", "Updating DigitalPlat nameservers"
+                )
+            )
+            await self.store.save()
+            await _run_sync(digitalplat.update_nameservers, record["domain"], nameservers)
+            record["cloudflare_steps"][-1] = self._cloudflare_step(
+                "digitalplat_delegation", "success", "Nameserver delegation updated"
+            )
+            record["nameservers"] = nameservers
+
+            latest_zone = await _run_sync(cloudflare.get_zone, zone_id)
+            zone_status = str(latest_zone.get("status", zone.get("status", "pending"))).lower()
+            active = zone_status == "active"
+            record["cloudflare_steps"].append(
+                self._cloudflare_step(
+                    "cloudflare_activation",
+                    "success" if active else "pending",
+                    "Cloudflare is active" if active else "Waiting for DNS propagation; refresh later",
+                )
+            )
+            record["cloudflare_status"] = "active" if active else "pending"
+            record["cloudflare_checked_at"] = _timestamp()
+        except (CloudflareAPIError, DigitalPlatAPIError, ValueError) as error:
+            if record.get("cloudflare_steps") and record["cloudflare_steps"][-1].get("status") == "running":
+                name = record["cloudflare_steps"][-1]["name"]
+                record["cloudflare_steps"][-1] = self._cloudflare_step(name, "failed", str(error))
+            record["cloudflare_status"] = "failed"
+            record["cloudflare_error"] = _safe_error(error)
+        await self.store.save()
+        return record
+
+    @staticmethod
     def normalize_subscription(request: Dict[str, Any]) -> Dict[str, Any]:
         prefix = str(request.get("prefix", "")).strip().lower()
         suffix = str(request.get("suffix", "")).strip().lower().lstrip(".")
         separator = str(request.get("separator", DEFAULT_SEPARATOR)).strip()
         random_length = request.get("random_length", 6)
         slot_type = str(request.get("slot_type", "subscription")).strip().lower()
+        auto_cloudflare = bool(request.get("auto_cloudflare", False))
         nameservers = [str(value).strip().lower().rstrip(".") for value in request.get("nameservers", []) if str(value).strip()]
         if prefix and not LABEL_PATTERN.fullmatch(prefix):
             raise ValueError("Prefix must contain only lowercase letters, numbers, and hyphens")
@@ -397,8 +692,12 @@ class DomainAutomationManager:
         # but always generate a compact label for this suffix.
         if suffix == "dpdns.org":
             separator = DEFAULT_SEPARATOR
-        if len(nameservers) < 2 or any(not HOSTNAME_PATTERN.fullmatch(value) for value in nameservers):
-            raise ValueError("At least two valid nameserver hostnames are required")
+        if (not auto_cloudflare and len(nameservers) < 2) or any(
+            not HOSTNAME_PATTERN.fullmatch(value) for value in nameservers
+        ):
+            raise ValueError(
+                "At least two valid nameservers are required unless Cloudflare automation is enabled"
+            )
         if len(prefix) + len(separator) + random_length > 63:
             raise ValueError("Generated domain label would exceed 63 characters")
         return {
@@ -409,6 +708,7 @@ class DomainAutomationManager:
             "slot_type": slot_type,
             "random_length": random_length,
             "separator": separator,
+            "auto_cloudflare": auto_cloudflare,
             "enabled": bool(request.get("enabled", True)),
         }
 
@@ -430,6 +730,62 @@ class DomainAutomationManager:
         record.last_checked_at = _timestamp()
         await self.store.save()
         return record.safe_dict()
+
+    async def sync_domains(self) -> Dict[str, Any]:
+        synced = 0
+        errors: List[Dict[str, str]] = []
+        by_domain = {
+            str(item.get("domain", "")).lower(): item
+            for item in self.store.domains
+            if item.get("domain")
+        }
+        for token in self.store.tokens.values():
+            if not token.enabled:
+                continue
+            try:
+                inventory = await _run_sync(
+                    self.client_factory(token.token, self.api_base).list_domains
+                )
+            except DigitalPlatAPIError as error:
+                errors.append({"token_id": token.id, "error": str(error)})
+                continue
+            for item in inventory:
+                domain = str(item.get("name") or item.get("domain") or "").lower().rstrip(".")
+                if not HOSTNAME_PATTERN.fullmatch(domain):
+                    continue
+                nameservers = [
+                    str(value).lower().rstrip(".")
+                    for value in item.get("nameservers", [])
+                    if str(value).strip()
+                ]
+                record = by_domain.get(domain)
+                if not record:
+                    record = {
+                        "domain": domain,
+                        "token_id": token.id,
+                        "token_name": token.name,
+                        "subscription_id": None,
+                        "slot_type": item.get("slot_type") or item.get("lifecycle_type") or "unknown",
+                        "nameservers": nameservers,
+                        "registered_at": item.get("registration_date") or _timestamp(),
+                        "status": item.get("status", "ok"),
+                        "source": "digitalplat_sync",
+                    }
+                    self.store.domains.append(record)
+                    by_domain[domain] = record
+                    synced += 1
+                else:
+                    record["token_id"] = token.id
+                    record["token_name"] = token.name
+                    if nameservers:
+                        record["nameservers"] = nameservers
+                    record["status"] = item.get("status", record.get("status", "ok"))
+        await self.store.save()
+        return {
+            "synced": synced,
+            "total": len(self.store.domains),
+            "errors": errors,
+        }
 
     def _candidate(self, subscription: PrefixSubscription) -> str:
         alphabet = string.ascii_lowercase + string.digits
@@ -462,6 +818,8 @@ class DomainAutomationManager:
         selected = [token_id for token_id in selected if self.store.tokens.get(token_id) and self.store.tokens[token_id].enabled]
         if not selected:
             raise ValueError("At least one enabled API Token is required")
+        if subscription.auto_cloudflare and not self.store.cloudflare:
+            raise ValueError("Cloudflare configuration is required for this subscription")
         if not isinstance(target_count, int) or not 1 <= target_count <= 100:
             raise ValueError("Target count must be between 1 and 100")
         attempt_limit = max_attempts or target_count * 10
@@ -517,7 +875,7 @@ class DomainAutomationManager:
                         client.register_domain,
                         domain,
                         subscription.slot_type,
-                        subscription.nameservers,
+                        [] if subscription.auto_cloudflare else subscription.nameservers,
                     )
                     attempt.steps[-1] = self._step("registration_request", "success", "Registration accepted")
                     returned_name = str(response.get("name") or response.get("domain") or domain).lower()
@@ -532,16 +890,20 @@ class DomainAutomationManager:
                         "lifecycle_type": response.get("lifecycle_type"),
                     }
                     job.successful_domains += 1
-                    self.store.domains.append({
+                    domain_record = {
                         "domain": returned_name,
                         "token_id": token.id,
                         "token_name": token.name,
                         "subscription_id": subscription.id,
                         "slot_type": subscription.slot_type,
-                        "nameservers": subscription.nameservers,
+                        "nameservers": [] if subscription.auto_cloudflare else subscription.nameservers,
                         "registered_at": _timestamp(),
                         "status": response.get("status", "ok"),
-                    })
+                    }
+                    self.store.domains.append(domain_record)
+                    await self.store.save()
+                    if subscription.auto_cloudflare and self.store.cloudflare:
+                        await self.host_domain_on_cloudflare(returned_name)
                 except DigitalPlatAPIError as error:
                     if attempt.steps[-1].get("name") == "registration_request" and attempt.steps[-1].get("status") == "running":
                         attempt.steps[-1] = self._step("registration_request", "failed", str(error))
@@ -561,16 +923,20 @@ class DomainAutomationManager:
                         attempt.steps[-1] = self._step("registration_verification", "success", "Domain found during reconciliation")
                         attempt.status = "succeeded"
                         job.successful_domains += 1
-                        self.store.domains.append({
+                        domain_record = {
                             "domain": domain,
                             "token_id": token.id,
                             "token_name": token.name,
                             "subscription_id": subscription.id,
                             "slot_type": subscription.slot_type,
-                            "nameservers": subscription.nameservers,
+                            "nameservers": [] if subscription.auto_cloudflare else subscription.nameservers,
                             "registered_at": _timestamp(),
                             "status": "ok",
-                        })
+                        }
+                        self.store.domains.append(domain_record)
+                        await self.store.save()
+                        if subscription.auto_cloudflare and self.store.cloudflare:
+                            await self.host_domain_on_cloudflare(domain)
                     else:
                         if error.ambiguous:
                             attempt.steps[-1] = self._step("registration_verification", "failed", "Domain not confirmed; candidate will not be retried")
@@ -609,11 +975,15 @@ class DomainAutomationManager:
             "subscriptions": [item.to_dict() for item in self.store.subscriptions.values()],
             "jobs": [item.to_dict() for item in jobs[:50]],
             "domains": list(reversed(self.store.domains[-200:])),
+            "cloudflare": self.store.cloudflare.safe_dict() if self.store.cloudflare else None,
             "stats": {
                 "tokens": len(self.store.tokens),
                 "enabled_tokens": sum(item.enabled for item in self.store.tokens.values()),
                 "subscriptions": len(self.store.subscriptions),
                 "running_jobs": sum(item.status == "running" for item in jobs),
                 "registered_domains": len(self.store.domains),
+                "cloudflare_active": sum(
+                    item.get("cloudflare_status") == "active" for item in self.store.domains
+                ),
             },
         }

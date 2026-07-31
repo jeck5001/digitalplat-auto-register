@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from digitalplat_auto_register.core.account import AccountStore
 from digitalplat_auto_register.core.domain_automation import (
     APITokenRecord,
+    CloudflareSettings,
     DEFAULT_USER_AGENT,
     DigitalPlatAPIError,
     DigitalPlatDomainClient,
@@ -39,6 +40,41 @@ class FakeDomainClient:
             "slot_type": slot_type,
             "lifecycle_type": slot_type,
         }
+
+    def update_nameservers(self, domain, nameservers):
+        self.inventory.setdefault(self.token, []).append({
+            "name": domain,
+            "nameservers": nameservers,
+        })
+        return {"name": domain, "nameservers": nameservers}
+
+
+class FakeCloudflareClient:
+    zones = {}
+
+    def __init__(self, api_token, account_id, api_base):
+        self.api_token = api_token
+        self.account_id = account_id
+
+    def verify_token(self):
+        return {"status": "active"}
+
+    def find_zone(self, domain):
+        return self.zones.get(domain)
+
+    def create_zone(self, domain):
+        zone = {
+            "id": f"zone-{domain}",
+            "name": domain,
+            "status": "pending",
+            "name_servers": ["alice.ns.cloudflare.com", "bob.ns.cloudflare.com"],
+        }
+        self.zones[domain] = zone
+        return zone
+
+    def get_zone(self, zone_id):
+        domain = zone_id.removeprefix("zone-")
+        return self.zones[domain]
 
 
 def build_manager(tmp_path):
@@ -180,3 +216,115 @@ def test_dpdns_subscription_normalization_removes_hyphen():
     })
 
     assert subscription["separator"] == ""
+
+
+def test_cloudflare_subscription_allows_empty_nameservers():
+    subscription = DomainAutomationManager.normalize_subscription({
+        "name": "Cloudflare",
+        "prefix": "app",
+        "suffix": "dpdns.org",
+        "slot_type": "free",
+        "random_length": 6,
+        "auto_cloudflare": True,
+        "nameservers": [],
+    })
+
+    assert subscription["auto_cloudflare"] is True
+    assert subscription["nameservers"] == []
+
+
+def test_existing_domain_can_be_hosted_on_cloudflare(tmp_path):
+    FakeDomainClient.inventory = {}
+    FakeCloudflareClient.zones = {}
+    store, unused, subscription = build_manager(tmp_path)
+    store.cloudflare = CloudflareSettings(
+        account_id="0123456789abcdef0123456789abcdef",
+        api_token="cloudflare_test_token_123456789",
+    )
+    token = next(iter(store.tokens.values()))
+    store.domains.append({
+        "domain": "app123.dpdns.org",
+        "token_id": token.id,
+        "token_name": token.name,
+        "subscription_id": subscription.id,
+        "slot_type": "free",
+        "nameservers": [],
+        "status": "ok",
+    })
+    manager = DomainAutomationManager(
+        store,
+        FakeDomainClient,
+        FakeCloudflareClient,
+    )
+
+    record = asyncio.run(manager.host_domain_on_cloudflare("app123.dpdns.org"))
+
+    assert record["cloudflare_status"] == "pending"
+    assert record["nameservers"] == [
+        "alice.ns.cloudflare.com",
+        "bob.ns.cloudflare.com",
+    ]
+    assert [step["status"] for step in record["cloudflare_steps"]] == [
+        "success",
+        "success",
+        "success",
+        "pending",
+    ]
+
+
+def test_cloudflare_web_api_masks_token_and_hosts_domain(tmp_path):
+    account_store = AccountStore(tmp_path / "accounts.json")
+    registration_manager = RegistrationManager(account_store, tmp_path / "jobs.json")
+    domain_store, unused, subscription = build_manager(tmp_path)
+    token = next(iter(domain_store.tokens.values()))
+    domain_store.domains.append({
+        "domain": "web123.dpdns.org",
+        "token_id": token.id,
+        "token_name": token.name,
+        "subscription_id": subscription.id,
+        "slot_type": "free",
+        "nameservers": [],
+        "status": "ok",
+    })
+    domain_manager = DomainAutomationManager(
+        domain_store,
+        FakeDomainClient,
+        FakeCloudflareClient,
+    )
+    app = create_app(
+        registration_manager,
+        account_store,
+        domain_store,
+        domain_manager,
+    )
+
+    with TestClient(app) as client:
+        saved = client.put("/api/domain-automation/cloudflare", json={
+            "account_id": "0123456789abcdef0123456789abcdef",
+            "api_token": "cloudflare_test_token_123456789",
+        })
+        hosted = client.post(
+            "/api/domain-automation/domains/web123.dpdns.org/cloudflare"
+        )
+        overview = client.get("/api/domain-automation")
+
+    assert saved.status_code == 200
+    assert "cloudflare_test_token_123456789" not in saved.text
+    assert hosted.status_code == 200
+    assert overview.json()["cloudflare"]["token_masked"].startswith("cloudfla")
+
+
+def test_sync_domains_imports_domains_from_each_enabled_token(tmp_path):
+    FakeDomainClient.inventory = {
+        "dp_test_token_a_123456": [{
+            "name": "synced.dpdns.org",
+            "status": "ok",
+            "nameservers": ["alice.ns.cloudflare.com", "bob.ns.cloudflare.com"],
+        }],
+    }
+    store, manager, unused = build_manager(tmp_path)
+    result = asyncio.run(manager.sync_domains())
+
+    assert result["synced"] == 1
+    assert store.domains[0]["domain"] == "synced.dpdns.org"
+    assert store.domains[0]["source"] == "digitalplat_sync"
