@@ -116,6 +116,7 @@ class RegistrationResult:
     # Registration details
     username: Optional[str] = None
     email: Optional[str] = None
+    password: Optional[str] = None
     email_verified: bool = False
     account_created: bool = False
     registration_status: RegistrationStatus = RegistrationStatus.PENDING

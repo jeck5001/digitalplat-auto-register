@@ -295,6 +295,8 @@ class DigitalPlatRegistrar:
             self.registration_result.email_verified = True
             self.registration_result.account_created = True
             self.registration_result.final_url = browser_verify_result.url
+            self.registration_result.password = user_profile.password
+            self.registration_result.email = user_profile.email
             
             if browser_verify_result.screenshot:
                 self.registration_result.browser_result.screenshot = browser_verify_result.screenshot
