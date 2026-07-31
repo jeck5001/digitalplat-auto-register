@@ -503,6 +503,8 @@ class DigitalPlatRegistrar:
 async def register_with_defaults(
     referral_code: str = "",
     config_file: Optional[str] = None,
+    turnstile_sitekey: Optional[str] = None,
+    turnstile_endpoint: Optional[str] = None,
     **kwargs
 ) -> RegistrationResult:
     """
@@ -511,6 +513,8 @@ async def register_with_defaults(
     Args:
         referral_code: Referral code to use
         config_file: Optional configuration file path
+        turnstile_sitekey: Optional override for Turnstile sitekey
+        turnstile_endpoint: Optional override for Turnstile solver endpoint
         **kwargs: Additional arguments passed to register_account
         
     Returns:
@@ -525,6 +529,12 @@ async def register_with_defaults(
     if config_file:
         config_manager.load_from_file(config_file)
     config = config_manager.load()
+    
+    # Apply Turnstile overrides from web UI
+    if turnstile_sitekey:
+        config.turnstile.sitekey = turnstile_sitekey
+    if turnstile_endpoint:
+        config.turnstile.remote_endpoint = turnstile_endpoint
     
     # Create registrar and register
     registrar = DigitalPlatRegistrar(config)
