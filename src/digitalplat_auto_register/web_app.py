@@ -33,6 +33,22 @@ DEFAULT_ACCOUNTS_PATH = "/app/data/accounts.json"
 MAX_JOB_HISTORY = 50
 MAX_CONCURRENT_REGISTRATIONS = 3
 RUNNING_INTERRUPTED_MESSAGE = "Registration stopped because the service restarted."
+REGISTRATION_STEP_ORDER = (
+    "turnstile_token_acquisition",
+    "email_creation",
+    "browser_navigation",
+    "form_submission",
+    "verification_email_retrieval",
+    "verification_completion",
+)
+REGISTRATION_STEP_LABELS = {
+    "turnstile_token_acquisition": "Turnstile 验证",
+    "email_creation": "创建临时邮箱",
+    "browser_navigation": "打开注册页面",
+    "form_submission": "提交注册表单",
+    "verification_email_retrieval": "获取验证邮件",
+    "verification_completion": "完成邮箱验证",
+}
 
 
 def _timestamp() -> str:
@@ -215,15 +231,29 @@ class RegistrationManager:
         )
         self._account_store.create_account(account)
         job.account_id = account.id
+        account.metadata.setdefault("steps", [])
+        account.metadata["current_step"] = REGISTRATION_STEP_ORDER[0]
 
         def on_step_complete(step: StepResult) -> None:
-            job.steps.append({
+            step_data = {
                 "name": step.name,
                 "success": step.success,
                 "duration": step.duration,
                 "message": step.message,
-            })
-            account.metadata["last_step"] = step.name
+                "error": step.error,
+                "timestamp": step.timestamp.isoformat(),
+            }
+            job.steps.append(step_data)
+            account.metadata["steps"].append(step_data)
+            try:
+                current_index = REGISTRATION_STEP_ORDER.index(step.name)
+            except ValueError:
+                current_index = -1
+            account.metadata["current_step"] = (
+                REGISTRATION_STEP_ORDER[current_index + 1]
+                if current_index + 1 < len(REGISTRATION_STEP_ORDER)
+                else None
+            )
             asyncio.create_task(self._account_store.save())
 
         try:
@@ -251,7 +281,20 @@ class RegistrationManager:
                 }
                 job.status = "succeeded"
             else:
-                account.mark_failed(result.error or "Unknown error", result.error_stage)
+                failed_step = account.metadata.get("current_step")
+                account.mark_failed(result.error or "Unknown error", failed_step or result.error_stage)
+                if failed_step and not any(
+                    step.get("name") == failed_step and step.get("success") is False
+                    for step in account.metadata["steps"]
+                ):
+                    account.metadata["steps"].append({
+                        "name": failed_step,
+                        "success": False,
+                        "duration": None,
+                        "message": result.error or "注册步骤失败",
+                        "error": result.error,
+                        "timestamp": _timestamp(),
+                    })
                 job.error = result.error
                 job.status = "failed"
                 
@@ -262,6 +305,7 @@ class RegistrationManager:
         finally:
             job.finished_at = _timestamp()
             self._active_job_ids.discard(job.id)
+            account.metadata["current_step"] = None
             await self._account_store.save()
 
     async def _run_batch(self, batch_job_id: str) -> None:
@@ -283,7 +327,8 @@ class RegistrationManager:
                     return
 
                 account.mark_registering()
-                batch_job.completed_accounts += 1
+                account.metadata.setdefault("steps", [])
+                account.metadata["current_step"] = REGISTRATION_STEP_ORDER[0]
                 await self._account_store.save()
 
                 def on_step_complete(step: StepResult) -> None:
@@ -300,7 +345,18 @@ class RegistrationManager:
                     if step.error:
                         step_dict['error'] = step.error
                     account.metadata['steps'].append(step_dict)
-                    account.metadata['current_step'] = step.name
+                    # Keep the UI focused on the next operation.  The callback is
+                    # invoked after a step completes, so exposing the completed
+                    # step as "current" made the progress indicator appear stuck.
+                    try:
+                        current_index = REGISTRATION_STEP_ORDER.index(step.name)
+                    except ValueError:
+                        current_index = -1
+                    account.metadata['current_step'] = (
+                        REGISTRATION_STEP_ORDER[current_index + 1]
+                        if current_index + 1 < len(REGISTRATION_STEP_ORDER)
+                        else None
+                    )
                     asyncio.create_task(self._account_store.save())
 
                 try:
@@ -329,13 +385,38 @@ class RegistrationManager:
                         batch_job.successful_accounts += 1
                         logger.info(f"Account registered: {account.username} ({account.email})")
                     else:
-                        account.mark_failed(result.error or "Unknown error", result.error_stage)
+                        failed_step = account.metadata.get("current_step")
+                        account.mark_failed(result.error or "Unknown error", failed_step or result.error_stage)
                         batch_job.failed_accounts += 1
+                        if failed_step and not any(
+                            step.get("name") == failed_step and step.get("success") is False
+                            for step in account.metadata["steps"]
+                        ):
+                            account.metadata["steps"].append({
+                                "name": failed_step,
+                                "success": False,
+                                "duration": None,
+                                "message": result.error or "注册步骤失败",
+                                "error": result.error,
+                                "timestamp": _timestamp(),
+                            })
                         
                 except Exception as e:
                     account.mark_failed(str(e))
                     batch_job.failed_accounts += 1
-                
+                    current_step = account.metadata.get("current_step") or "registration_workflow"
+                    if not any(step.get("name") == current_step and not step.get("success") for step in account.metadata["steps"]):
+                        account.metadata["steps"].append({
+                            "name": current_step,
+                            "success": False,
+                            "duration": None,
+                            "message": str(e),
+                            "error": str(e),
+                            "timestamp": _timestamp(),
+                        })
+                finally:
+                    batch_job.completed_accounts += 1
+                    account.metadata["current_step"] = None
                 await self._account_store.save()
 
         try:
@@ -372,6 +453,40 @@ class RegistrationManager:
             "total_jobs": len(jobs),
             "successful_jobs": sum(job["status"] == "succeeded" for job in jobs),
             "account_overview": self._account_store.get_overview(),
+        }
+
+    @staticmethod
+    def account_progress(account: Account) -> Dict[str, Any]:
+        """Return a stable, UI-ready view of every registration step."""
+        recorded = {step.get("name"): step for step in account.metadata.get("steps", [])}
+        is_incomplete = account.status in (AccountStatus.PENDING, AccountStatus.REGISTERING)
+        steps = []
+        for name in REGISTRATION_STEP_ORDER:
+            item = recorded.get(name)
+            if item:
+                steps.append({**item, "label": REGISTRATION_STEP_LABELS[name], "status": "success" if item.get("success") else "failed"})
+            else:
+                steps.append({
+                    "name": name,
+                    "label": REGISTRATION_STEP_LABELS[name],
+                    "status": "pending" if is_incomplete else "skipped",
+                    "success": None,
+                    "duration": None,
+                    "message": "等待执行" if is_incomplete else "未执行",
+                })
+        current = account.metadata.get("current_step")
+        if account.status == AccountStatus.REGISTERING and not current:
+            current = next((step["name"] for step in steps if step["status"] == "pending"), None)
+        return {
+            "account_id": account.id,
+            "username": account.username,
+            "status": account.status.value,
+            "current_step": current,
+            "steps": steps,
+            "total_steps": len(REGISTRATION_STEP_ORDER),
+            "completed_steps": sum(step["status"] in ("success", "failed") for step in steps),
+            "error": _safe_text(account.error),
+            "error_stage": account.error_stage,
         }
 
     def _job_from_snapshot(self, raw: Any) -> Optional[RegistrationJob]:
@@ -519,10 +634,9 @@ def create_app(
             account = account_store.get_account(aid)
             if account:
                 # Include password for active accounts so users can use them
-                if account.status == AccountStatus.ACTIVE:
-                    accounts.append(account.to_dict())
-                else:
-                    accounts.append(account.to_safe_dict())
+                account_data = account.to_dict() if account.status == AccountStatus.ACTIVE else account.to_safe_dict()
+                account_data["progress"] = manager.account_progress(account)
+                accounts.append(account_data)
         
         return {
             **job.to_dict(),
@@ -602,17 +716,7 @@ def create_app(
         account = account_store.get_account(account_id)
         if not account:
             raise HTTPException(status_code=404, detail="Account not found")
-        steps = account.metadata.get('steps', [])
-        return {
-            "account_id": account_id,
-            "username": account.username,
-            "status": account.status.value,
-            "current_step": account.metadata.get('current_step'),
-            "steps": steps,
-            "total_steps": len(steps),
-            "error": account.error,
-            "error_stage": account.error_stage,
-        }
+        return manager.account_progress(account)
 
     @app.put("/api/accounts/{account_id}")
     async def update_account(account_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
@@ -722,6 +826,8 @@ def create_app(
             raise HTTPException(status_code=400, detail="Account is already active")
         
         account.mark_registering()
+        account.metadata["steps"] = []
+        account.metadata["current_step"] = REGISTRATION_STEP_ORDER[0]
         await account_store.save()
         
         # Start async registration
@@ -738,6 +844,27 @@ def create_app(
         account = account_store.get_account(account_id)
         if not account:
             return
+
+        def on_step_complete(step: StepResult) -> None:
+            step_data = {
+                "name": step.name,
+                "success": step.success,
+                "duration": step.duration,
+                "message": step.message,
+                "error": step.error,
+                "timestamp": step.timestamp.isoformat(),
+            }
+            account.metadata.setdefault("steps", []).append(step_data)
+            try:
+                current_index = REGISTRATION_STEP_ORDER.index(step.name)
+            except ValueError:
+                current_index = -1
+            account.metadata["current_step"] = (
+                REGISTRATION_STEP_ORDER[current_index + 1]
+                if current_index + 1 < len(REGISTRATION_STEP_ORDER)
+                else None
+            )
+            asyncio.create_task(account_store.save())
         
         try:
             result = await register_with_defaults(
@@ -752,6 +879,7 @@ def create_app(
                 postal_code=account.postal_code,
                 country=account.country,
                 referral_code=account.referral_code or DEFAULT_REFERRAL_CODE,
+                on_step_complete=on_step_complete,
             )
             
             if result.success:
@@ -763,11 +891,25 @@ def create_app(
                     account.password = result.password
                 account.mark_active()
             else:
-                account.mark_failed(result.error or "Unknown error", result.error_stage)
+                failed_step = account.metadata.get("current_step")
+                account.mark_failed(result.error or "Unknown error", failed_step or result.error_stage)
+                if failed_step and not any(
+                    step.get("name") == failed_step and step.get("success") is False
+                    for step in account.metadata.get("steps", [])
+                ):
+                    account.metadata.setdefault("steps", []).append({
+                        "name": failed_step,
+                        "success": False,
+                        "duration": None,
+                        "message": result.error or "注册步骤失败",
+                        "error": result.error,
+                        "timestamp": _timestamp(),
+                    })
                 
         except Exception as e:
             account.mark_failed(str(e))
-        
+
+        account.metadata["current_step"] = None
         await account_store.save()
 
     return app
@@ -860,6 +1002,99 @@ DASHBOARD_HTML = """<!doctype html>
     .modal { background:#fff; border-radius:8px; padding:24px; max-width:500px; width:90%; max-height:80vh; overflow:auto; }
     .modal h3 { margin-top:0; }
     .modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:20px; }
+    /* Calm operations-workspace treatment: dense, readable, and one accent. */
+    :root {
+      --ink:#17211d; --muted:#68756f; --line:#dfe7e3; --paper:#f3f6f4;
+      --panel:#ffffff; --green:#087f5b; --green-soft:#e7f5ef; --red:#c2413a;
+      --amber:#a16207; --teal:#087f5b; --blue:#2563eb;
+    }
+    body { background:linear-gradient(180deg,#edf3f0 0,#f7f9f8 260px); min-height:100vh; }
+    main { max-width:1440px; padding:0 28px 56px; }
+    header { margin:0 -28px; padding:25px 28px 23px; align-items:center; border:0; background:#14231d; color:#fff; }
+    h1 { font-size:25px; letter-spacing:-.02em; }
+    header .subtitle { color:#aebdb6; margin-top:5px; }
+    #updated { display:flex; align-items:center; gap:8px; }
+    #updated::before { content:""; width:8px; height:8px; border-radius:50%; background:#42d39a; box-shadow:0 0 0 4px rgba(66,211,154,.13); }
+    nav { margin:0 -28px 26px; padding:0 28px; background:#fff; border-bottom:1px solid var(--line); gap:22px; }
+    nav button { padding:16px 2px 13px; border-bottom-width:2px; font-size:14px; }
+    nav button:hover { background:transparent; }
+    .tab-content { padding-top:0; animation:contentIn .22s ease-out; }
+    @keyframes contentIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+    .metrics { border:0; border-bottom:1px solid var(--line); background:transparent; gap:0; margin:0 0 28px; }
+    .metric { background:transparent; border-right:1px solid var(--line); padding:17px 22px 19px; }
+    .metric:first-child { padding-left:0; }
+    .metric:last-child { border-right:0; }
+    .metric-label { font-size:12px; letter-spacing:.03em; }
+    .metric-value { font-size:30px; font-weight:650; letter-spacing:-.04em; }
+    .card { border:1px solid var(--line); border-radius:12px; overflow:hidden; box-shadow:0 8px 28px rgba(24,49,38,.035); }
+    .card-header { padding:17px 20px; background:#fbfcfb; }
+    .card-body { padding:18px 20px; }
+    th { background:#f7f9f8; color:#63716a; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+    th, td { padding:12px 14px; }
+    tbody tr { transition:background .15s ease; }
+    .badge { padding:4px 9px; border-radius:6px; letter-spacing:.02em; }
+    .badge-running, .badge-registering { animation:none; position:relative; padding-left:20px; }
+    .badge-running::before, .badge-registering::before { content:""; position:absolute; left:8px; top:50%; width:6px; height:6px; margin-top:-3px; border-radius:50%; background:currentColor; animation:pulse 1.3s infinite; }
+    input, select, textarea { border-color:#cfd9d4; border-radius:7px; padding:11px 12px; }
+    input:focus, select:focus, textarea:focus { box-shadow:0 0 0 3px rgba(8,127,91,.1); }
+    button.btn { border-radius:7px; box-shadow:none; }
+    button.btn:hover { box-shadow:none; }
+    .progress-bar { height:7px; background:#e7ece9; }
+    .progress-fill { background:linear-gradient(90deg,#087f5b,#21a179); }
+    .task-id { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; color:#405049; }
+    .task-progress { min-width:150px; }
+    .task-progress-line { display:flex; justify-content:space-between; color:var(--muted); font-size:11px; margin-bottom:6px; }
+    .link-button { border:0; background:transparent; color:var(--green); padding:4px; cursor:pointer; font:inherit; font-weight:600; }
+    .modal-overlay { background:rgba(15,29,23,.62); backdrop-filter:blur(4px); padding:24px; }
+    .modal { border-radius:14px; padding:0; box-shadow:0 26px 80px rgba(9,24,17,.28); }
+    .modal-wide { max-width:1040px; width:min(1040px,96vw); max-height:90vh; }
+    .modal h3 { margin:0; padding:20px 24px; border-bottom:1px solid var(--line); font-size:18px; }
+    #account-detail-content { padding:20px 24px; }
+    .modal-actions { margin:0; padding:14px 24px; border-top:1px solid var(--line); }
+    .batch-summary { display:grid; grid-template-columns:1.5fr repeat(4,1fr); gap:1px; background:var(--line); border:1px solid var(--line); border-radius:10px; overflow:hidden; margin-bottom:22px; }
+    .batch-summary > div { background:#fff; padding:14px 16px; }
+    .summary-label { color:var(--muted); font-size:11px; margin-bottom:5px; }
+    .summary-value { font-size:19px; font-weight:650; font-variant-numeric:tabular-nums; }
+    .account-progress { border-top:1px solid var(--line); }
+    .account-progress:first-child { border-top:0; }
+    .account-progress summary { list-style:none; display:grid; grid-template-columns:minmax(160px,1.4fr) 110px minmax(160px,1fr) 28px; gap:16px; align-items:center; padding:15px 2px; cursor:pointer; }
+    .account-progress summary::-webkit-details-marker { display:none; }
+    .account-name { min-width:0; }
+    .account-name strong { display:block; overflow:hidden; text-overflow:ellipsis; }
+    .account-email { color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:3px; }
+    .account-chevron { color:var(--muted); transition:transform .18s ease; }
+    .account-progress[open] .account-chevron { transform:rotate(90deg); }
+    .step-timeline { display:grid; grid-template-columns:repeat(6,1fr); padding:5px 6px 22px; }
+    .timeline-step { position:relative; padding:31px 9px 0 0; min-width:0; }
+    .timeline-step::before { content:""; position:absolute; left:8px; right:-8px; top:13px; height:2px; background:#dfe6e2; }
+    .timeline-step:last-child::before { right:calc(100% - 8px); }
+    .step-dot { position:absolute; left:0; top:5px; z-index:1; width:18px; height:18px; border-radius:50%; display:grid; place-items:center; background:#fff; border:2px solid #cbd5d0; color:#fff; font-size:10px; }
+    .timeline-step.success::before { background:#65b999; }
+    .timeline-step.success .step-dot { background:var(--green); border-color:var(--green); }
+    .timeline-step.failed .step-dot { background:var(--red); border-color:var(--red); }
+    .timeline-step.current .step-dot { border-color:var(--green); box-shadow:0 0 0 5px rgba(8,127,91,.11); animation:pulse 1.4s infinite; }
+    .step-name { font-size:12px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .step-meta { color:var(--muted); font-size:11px; margin-top:4px; line-height:1.45; }
+    .step-error { color:var(--red); font-size:12px; padding:0 6px 18px; }
+    .empty-state { color:var(--muted); text-align:center; padding:28px 12px !important; }
+    @media (max-width:900px) {
+      .grid-2 { grid-template-columns:1fr; }
+      .batch-summary { grid-template-columns:repeat(2,1fr); }
+      .batch-summary > div:first-child { grid-column:1/-1; }
+      .step-timeline { grid-template-columns:1fr; padding-left:9px; }
+      .timeline-step { padding:4px 0 18px 36px; }
+      .timeline-step::before { left:8px; right:auto; top:13px; bottom:-5px; width:2px; height:auto; }
+      .timeline-step:last-child::before { display:none; }
+    }
+    @media (max-width:700px) {
+      main { padding-left:14px; padding-right:14px; }
+      header, nav { margin-left:-14px; margin-right:-14px; padding-left:14px; padding-right:14px; }
+      .metrics { grid-template-columns:repeat(2,1fr); }
+      .metric { border-bottom:1px solid var(--line); }
+      .account-progress summary { grid-template-columns:1fr auto; }
+      .account-progress summary .task-progress { grid-column:1/-1; }
+      .account-chevron { grid-column:2; grid-row:1; }
+    }
   </style>
 </head>
 <body>
@@ -1048,8 +1283,8 @@ DASHBOARD_HTML = """<!doctype html>
 
   <!-- Account Detail Modal -->
   <div class="modal-overlay" id="account-detail-modal">
-    <div class="modal">
-      <h3>账号详情</h3>
+    <div class="modal modal-wide">
+      <h3 id="detail-modal-title">账号详情</h3>
       <div id="account-detail-content"></div>
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick="closeModal('account-detail-modal')">关闭</button>
@@ -1077,6 +1312,22 @@ DASHBOARD_HTML = """<!doctype html>
                   status === 'pending' ? 'pending' : 'running';
       return `<span class="badge badge-${cls}">${labels[status] || status}</span>`;
     }
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>'"]/g, char => ({
+        '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;'
+      })[char]);
+    }
+
+    function formatTime(value) {
+      if (!value) return '-';
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? escapeHtml(value) : date.toLocaleString();
+    }
+
+    function progressPercent(item) {
+      return Math.min(100, Math.round(((item.completed_accounts || 0) / Math.max(item.total_accounts || 0, 1)) * 100));
+    }
     
     async function refresh() {
       try {
@@ -1097,6 +1348,7 @@ DASHBOARD_HTML = """<!doctype html>
         
         // Render tables
         renderRecentAccounts(data);
+        renderRecentBatches(data.batch_jobs || []);
         renderBatches(data.batch_jobs || []);
         renderJobs(data.jobs || []);
         
@@ -1108,6 +1360,23 @@ DASHBOARD_HTML = """<!doctype html>
       } catch (error) {
         document.getElementById('updated').textContent = '服务暂不可用';
       }
+    }
+
+    function renderRecentBatches(batches) {
+      const tbody = document.querySelector('#recent-batches-table tbody');
+      if (!batches || !batches.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="empty-state">暂无批量任务</td></tr>';
+        return;
+      }
+      tbody.innerHTML = batches.slice(0, 5).map(b => {
+        const pct = progressPercent(b);
+        return `<tr>
+          <td><button class="link-button task-id" onclick="viewBatch('${b.id}')">${escapeHtml(b.id)}</button></td>
+          <td>${b.total_accounts}</td>
+          <td><span style="color:var(--green)">${b.successful_accounts}</span>${b.failed_accounts ? ` / <span style="color:var(--red)">${b.failed_accounts} 失败</span>` : ''}</td>
+          <td><div class="task-progress"><div class="task-progress-line"><span>${statusBadge(b.status)}</span><span>${pct}%</span></div><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div></div></td>
+        </tr>`;
+      }).join('');
     }
     
     async function renderRecentAccounts(data) {
@@ -1133,20 +1402,22 @@ DASHBOARD_HTML = """<!doctype html>
       const tbody = document.querySelector('#batch-history-table tbody');
       if (!batches || !batches.length) {
         tbody.innerHTML = '<tr><td colspan="8" class="hint">暂无批量任务</td></tr>';
+        document.getElementById('active-batch-section').style.display = 'none';
         return;
       }
-      tbody.innerHTML = batches.map(b => 
-        `<tr>
-          <td>${b.id}</td>
+      tbody.innerHTML = batches.map(b => {
+        const pct = progressPercent(b);
+        return `<tr>
+          <td><button class="link-button task-id" onclick="viewBatch('${b.id}')">${escapeHtml(b.id)}</button></td>
           <td>${b.total_accounts}</td>
-          <td>${b.completed_accounts}</td>
+          <td><div class="task-progress"><div class="task-progress-line"><span>${b.completed_accounts} / ${b.total_accounts}</span><span>${pct}%</span></div><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div></div></td>
           <td style="color:var(--green)">${b.successful_accounts}</td>
           <td style="color:var(--red)">${b.failed_accounts}</td>
           <td>${statusBadge(b.status)}</td>
-          <td>${b.created_at}</td>
+          <td>${formatTime(b.created_at)}</td>
           <td><button class="btn btn-secondary" style="padding:4px 8px;font-size:11px" onclick="viewBatch('${b.id}')">详情</button></td>
-        </tr>`
-      ).join('');
+        </tr>`;
+      }).join('');
       
       // Show active batch if any
       const activeBatch = batches.find(b => b.status === 'running');
@@ -1155,10 +1426,13 @@ DASHBOARD_HTML = """<!doctype html>
         activeSection.style.display = 'block';
         const pct = Math.round((activeBatch.completed_accounts / activeBatch.total_accounts) * 100) || 0;
         document.getElementById('active-batch-info').innerHTML = `
-          <p><strong>任务ID:</strong> ${activeBatch.id}</p>
-          <p><strong>进度:</strong> ${activeBatch.completed_accounts} / ${activeBatch.total_accounts}</p>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap">
+            <div><div class="hint">任务 ID</div><strong class="task-id">${escapeHtml(activeBatch.id)}</strong></div>
+            <button class="btn btn-secondary" onclick="viewBatch('${activeBatch.id}')">查看每个账号进度</button>
+          </div>
+          <p><strong>整体进度:</strong> ${activeBatch.completed_accounts} / ${activeBatch.total_accounts}</p>
           <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
-          <p class="hint">成功: ${activeBatch.successful_accounts} | 失败: ${activeBatch.failed_accounts}</p>
+          <p class="hint">${pct}% · 成功 ${activeBatch.successful_accounts} · 失败 ${activeBatch.failed_accounts}</p>
         `;
       } else {
         activeSection.style.display = 'none';
@@ -1239,63 +1513,77 @@ DASHBOARD_HTML = """<!doctype html>
     }
     
     const stepLabels = {
-      'turnstile_token_acquisition': '🔑 Turnstile',
-      'email_creation': '📧 邮箱',
-      'browser_navigation': '🌐 导航',
-      'form_submission': '📝 表单',
-      'verification_email_retrieval': '📬 验证邮件',
-      'verification_completion': '✅ 完成'
+      'turnstile_token_acquisition': 'Turnstile 验证',
+      'email_creation': '创建临时邮箱',
+      'browser_navigation': '打开注册页',
+      'form_submission': '提交注册表单',
+      'verification_email_retrieval': '获取验证邮件',
+      'verification_completion': '完成邮箱验证'
     };
 
+    function stepTimeline(progress) {
+      const current = progress?.current_step;
+      return `<div class="step-timeline">${(progress?.steps || []).map(step => {
+        const isCurrent = step.name === current && progress.status !== 'failed';
+        const state = isCurrent ? 'current' : step.status;
+        const icon = step.status === 'success' ? '✓' : step.status === 'failed' ? '!' : '';
+        const duration = Number.isFinite(step.duration) ? `${step.duration.toFixed(1)} 秒` : '';
+        const stateText = isCurrent ? '正在执行' : step.status === 'success' ? '已完成' : step.status === 'failed' ? '失败' : step.status === 'skipped' ? '未执行' : '等待执行';
+        return `<div class="timeline-step ${state}">
+          <span class="step-dot">${icon}</span>
+          <div class="step-name" title="${escapeHtml(step.label || step.name)}">${escapeHtml(step.label || stepLabels[step.name] || step.name)}</div>
+          <div class="step-meta">${stateText}${duration ? ` · ${duration}` : ''}</div>
+        </div>`;
+      }).join('')}</div>`;
+    }
+
+    function accountProgressRow(account, open) {
+      const progress = account.progress || {steps:[], completed_steps:0, total_steps:6};
+      const pct = Math.round(((progress.completed_steps || 0) / Math.max(progress.total_steps || 6, 1)) * 100);
+      return `<details class="account-progress" data-account-id="${account.id}" ${open ? 'open' : ''}>
+        <summary>
+          <div class="account-name"><strong>${escapeHtml(account.username)}</strong><div class="account-email">${escapeHtml(account.email || account.id)}</div></div>
+          <div>${statusBadge(account.status)}</div>
+          <div class="task-progress"><div class="task-progress-line"><span>${progress.completed_steps || 0} / ${progress.total_steps || 6} 步</span><span>${pct}%</span></div><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div></div>
+          <div class="account-chevron">›</div>
+        </summary>
+        ${stepTimeline(progress)}
+        ${progress.error ? `<div class="step-error"><strong>失败原因：</strong>${escapeHtml(progress.error)}</div>` : ''}
+        ${account.status === 'active' && account.password ? `<div class="hint" style="padding:0 6px 18px">邮箱：${escapeHtml(account.email || '-')} · 密码：<code>${escapeHtml(account.password)}</code></div>` : ''}
+      </details>`;
+    }
+
     async function viewBatch(batchId) {
-      userClosedModal = false; // Reset flag when opening modal
-      const response = await fetch('/api/batch/' + batchId);
-      const data = await response.json();
-      if (!response.ok) {
-        showToast('加载失败: ' + (data.detail || '未知错误'), 'error');
-        return;
-      }
-      
-      // Build account list with progress indicators
-      let accountsHtml = '';
-      if (data.accounts && data.accounts.length > 0) {
-        accountsHtml = '<div style="margin-top:8px">';
-        for (const a of data.accounts) {
-          const statusColor = a.status === 'active' ? 'green' : (a.status === 'failed' ? 'red' : 'var(--muted)');
-          accountsHtml += `<div style="padding:6px 0;border-bottom:1px solid var(--line)">`;
-          accountsHtml += `<span style="color:${statusColor}">${a.status === 'active' ? '✓' : (a.status === 'failed' ? '✗' : '⏳')}</span> `;
-          accountsHtml += `<strong>${a.username}</strong>`;
-          if (a.email) accountsHtml += ` - ${a.email}`;
-          if (a.password && a.status === 'active') accountsHtml += ` - <code style="background:#def3e8;padding:2px 6px;border-radius:3px">${a.password}</code>`;
-          if (a.error) accountsHtml += `<br><span style="color:var(--red);font-size:12px">${a.error}</span>`;
-          accountsHtml += `</div>`;
+      const modal = document.getElementById('account-detail-modal');
+      const wasOpen = modal.classList.contains('active');
+      if (!wasOpen) userClosedModal = false;
+      try {
+        const response = await fetch('/api/batch/' + batchId);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || '未知错误');
+        const openAccounts = new Set(Array.from(document.querySelectorAll('.account-progress[open]')).map(el => el.dataset.accountId));
+        const accountsHtml = data.accounts?.length
+          ? data.accounts.map((account, index) => accountProgressRow(account, openAccounts.has(account.id) || (!wasOpen && index === 0))).join('')
+          : '<div class="empty-state">无账号</div>';
+        const pct = progressPercent(data);
+        document.getElementById('detail-modal-title').textContent = '批量任务进度';
+        document.getElementById('account-detail-content').innerHTML = `
+          <div class="batch-summary">
+            <div><div class="summary-label">任务 ID</div><div class="summary-value task-id">${escapeHtml(data.id)}</div></div>
+            <div><div class="summary-label">整体进度</div><div class="summary-value">${pct}%</div></div>
+            <div><div class="summary-label">已完成</div><div class="summary-value">${data.completed_accounts} / ${data.total_accounts}</div></div>
+            <div><div class="summary-label">成功</div><div class="summary-value" style="color:var(--green)">${data.successful_accounts}</div></div>
+            <div><div class="summary-label">失败</div><div class="summary-value" style="color:var(--red)">${data.failed_accounts}</div></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><strong>账号注册明细</strong>${statusBadge(data.status)}</div>
+          ${data.error ? `<div class="step-error" style="padding:8px 0 14px">${escapeHtml(data.error)}</div>` : ''}
+          <div>${accountsHtml}</div>`;
+        modal.classList.add('active');
+        if (!userClosedModal && (data.status === 'running' || data.status === 'pending')) {
+          setTimeout(() => { if (!userClosedModal) viewBatch(batchId); }, 3000);
         }
-        accountsHtml += '</div>';
-      } else {
-        accountsHtml = '<li>无账号</li>';
-      }
-      
-      document.getElementById('account-detail-content').innerHTML = `
-        <p><strong>任务ID:</strong> ${data.id}</p>
-        <p><strong>状态:</strong> ${data.status}</p>
-        <p><strong>总数:</strong> ${data.total_accounts}</p>
-        <p><strong>完成:</strong> ${data.completed_accounts}</p>
-        <p><strong>成功:</strong> <span style="color:var(--green)">${data.successful_accounts}</span></p>
-        <p><strong>失败:</strong> <span style="color:var(--red)">${data.failed_accounts}</span></p>
-        <p><strong>创建时间:</strong> ${data.created_at}</p>
-        ${data.error ? `<p style="color:var(--red)"><strong>错误:</strong> ${data.error}</p>` : ''}
-        <details style="margin-top:12px" open>
-          <summary>账号列表 (${data.accounts?.length || 0})</summary>
-          ${accountsHtml}
-        </details>
-      `;
-      document.getElementById('account-detail-modal').classList.add('active');
-      
-      // Auto-refresh if batch is still running (only if user hasn't closed)
-      if (!userClosedModal && (data.status === 'running' || data.status === 'pending')) {
-        setTimeout(() => {
-          if (!userClosedModal) viewBatch(batchId);
-        }, 3000);
+      } catch (error) {
+        showToast('加载失败: ' + error.message, 'error');
       }
     }
     
@@ -1356,62 +1644,30 @@ DASHBOARD_HTML = """<!doctype html>
         showToast('加载失败: ' + (data.detail || '未知错误'), 'error');
         return;
       }
+      document.getElementById('detail-modal-title').textContent = '账号详情';
       // Format the detail view with password highlighted for active accounts
-      let html = '';
+      let html = '<div class="batch-summary" style="grid-template-columns:repeat(3,1fr)">';
+      html += `<div><div class="summary-label">用户名</div><div class="summary-value">${escapeHtml(data.username)}</div></div>`;
+      html += `<div><div class="summary-label">账号状态</div><div class="summary-value">${statusBadge(data.status)}</div></div>`;
+      html += `<div><div class="summary-label">注册时间</div><div style="font-size:13px">${formatTime(data.registered_at || data.created_at)}</div></div></div>`;
+      html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 24px">';
       const fieldOrder = ['id', 'username', 'email', 'password', 'status', 'referral_code', 'fullname', 'phone', 'address_line1', 'city', 'state', 'postal_code', 'country', 'registered_at', 'created_at', 'error'];
       for (const key of fieldOrder) {
         if (data[key] !== undefined && data[key] !== null) {
           const isPassword = key === 'password' && data.status === 'active';
-          const value = Array.isArray(data[key]) ? JSON.stringify(data[key]) : (data[key] || '-');
-          html += `<p${isPassword ? ' style="background:#def3e8;padding:4px 8px;border-radius:4px"' : ''}><strong>${key}:</strong> ${value}</p>`;
+          const value = escapeHtml(Array.isArray(data[key]) ? JSON.stringify(data[key]) : (data[key] || '-'));
+          html += `<p${isPassword ? ' style="background:var(--green-soft);padding:8px;border-radius:6px"' : ''}><span class="hint">${escapeHtml(key)}</span><br><strong>${value}</strong></p>`;
         }
       }
+      html += '</div>';
       
       // Fetch and display real-time registration progress
       try {
         const progressResp = await fetch('/api/accounts/' + accountId + '/progress');
         const progress = await progressResp.json();
-        const stepLabels = {
-          'turnstile_token_acquisition': '🔑 Turnstile验证',
-          'email_creation': '📧 创建邮箱',
-          'browser_navigation': '🌐 浏览器导航',
-          'form_submission': '📝 提交表单',
-          'verification_email_retrieval': '📬 获取验证邮件',
-          'verification_completion': '✅ 完成验证'
-        };
-        const stepOrder = ['turnstile_token_acquisition', 'email_creation', 'browser_navigation', 'form_submission', 'verification_email_retrieval', 'verification_completion'];
-        
-        // Show full progress bar with all steps (even pending ones)
-        html += '<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line)">';
-        html += '<strong>注册进度:</strong>';
-        html += '<div class="steps" style="margin-top:8px">';
-        
-        let currentStepFound = false;
-        for (const stepName of stepOrder) {
-          const step = progress.steps?.find(s => s.name === stepName);
-          const label = stepLabels[stepName] || stepName;
-          
-          if (step) {
-            const cls = step.success === true ? 'ok' : (step.success === false ? 'no' : '');
-            const status = step.success === true ? '✓' : (step.success === false ? '✗' : '⏳');
-            html += `<span class="step ${cls}" title="${step.message || ''}">${status} ${label}${step.duration ? ' (' + step.duration.toFixed(1) + 's)' : ''}</span>`;
-          } else if (!currentStepFound && (progress.current_step === stepName || progress.status === 'registering' || progress.status === 'pending')) {
-            // Show current step as pulsing
-            html += `<span class="step current" title="进行中...">⏳ ${label}</span>`;
-            currentStepFound = true;
-          } else {
-            // Show future steps as pending
-            html += `<span class="step" title="等待中">○ ${label}</span>`;
-          }
-        }
-        html += '</div>';
-        if (progress.current_step) {
-          const currentLabel = stepLabels[progress.current_step] || progress.current_step;
-          html += `<p class="hint" style="margin-top:8px">⏱ 当前: ${currentLabel}</p>`;
-        }
-        if (progress.error) {
-          html += `<p style="color:var(--red);margin-top:8px"><strong>错误:</strong> ${progress.error}</p>`;
-        }
+        html += '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line)"><strong>注册流程</strong>';
+        html += stepTimeline(progress);
+        if (progress.error) html += `<div class="step-error"><strong>失败原因：</strong>${escapeHtml(progress.error)}</div>`;
         html += '</div>';
       } catch (e) {
         // Ignore progress fetch errors
