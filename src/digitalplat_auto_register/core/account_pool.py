@@ -9,6 +9,7 @@ This module provides account pool management functionality including:
 """
 
 import json
+import os
 import sqlite3
 import secrets
 import string
