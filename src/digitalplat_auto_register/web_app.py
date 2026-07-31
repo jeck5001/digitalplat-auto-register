@@ -279,12 +279,30 @@ class RegistrationManager:
                 batch_job.completed_accounts += 1
                 await self._account_store.save()
 
+                def on_step_complete(step: StepResult) -> None:
+                    """Store step progress in account metadata for real-time display."""
+                    if 'steps' not in account.metadata:
+                        account.metadata['steps'] = []
+                    step_dict = {
+                        'name': step.name,
+                        'success': step.success,
+                        'duration': step.duration,
+                        'message': step.message,
+                        'timestamp': datetime.now().astimezone().isoformat()
+                    }
+                    if step.error:
+                        step_dict['error'] = step.error
+                    account.metadata['steps'].append(step_dict)
+                    account.metadata['current_step'] = step.name
+                    asyncio.create_task(self._account_store.save())
+
                 try:
                     result = await register_with_defaults(
                         username=account.username,
                         password=account.password,
                         referral_code=batch_job.referral_code or DEFAULT_REFERRAL_CODE,
                         phone=_generate_phone_number(),
+                        on_step_complete=on_step_complete,
                     )
                     
                     if result.success:
@@ -560,6 +578,24 @@ def create_app(
         if not account:
             raise HTTPException(status_code=404, detail="Account not found")
         return account.to_safe_dict()
+
+    @app.get("/api/accounts/{account_id}/progress")
+    async def get_account_progress(account_id: str) -> Dict[str, Any]:
+        """Get real-time registration progress for an account."""
+        account = account_store.get_account(account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="Account not found")
+        steps = account.metadata.get('steps', [])
+        return {
+            "account_id": account_id,
+            "username": account.username,
+            "status": account.status.value,
+            "current_step": account.metadata.get('current_step'),
+            "steps": steps,
+            "total_steps": len(steps),
+            "error": account.error,
+            "error_stage": account.error_stage,
+        }
 
     @app.put("/api/accounts/{account_id}")
     async def update_account(account_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
@@ -1131,6 +1167,15 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
     
+    const stepLabels = {
+      'turnstile_token_acquisition': '🔑 Turnstile',
+      'email_creation': '📧 邮箱',
+      'browser_navigation': '🌐 导航',
+      'form_submission': '📝 表单',
+      'verification_email_retrieval': '📬 验证邮件',
+      'verification_completion': '✅ 完成'
+    };
+
     async function viewBatch(batchId) {
       const response = await fetch('/api/batch/' + batchId);
       const data = await response.json();
@@ -1138,23 +1183,46 @@ DASHBOARD_HTML = """<!doctype html>
         alert('加载失败: ' + (data.detail || '未知错误'));
         return;
       }
-      const accountsHtml = data.accounts?.map(a => 
-        `<li>${a.username} - ${a.email || '无邮箱'} - ${a.status}${a.password && a.status === 'active' ? ' - 密码: ' + a.password : ''}</li>`).join('') || '<li>无账号</li>';
+      
+      // Build account list with progress indicators
+      let accountsHtml = '';
+      if (data.accounts && data.accounts.length > 0) {
+        accountsHtml = '<div style="margin-top:8px">';
+        for (const a of data.accounts) {
+          const statusColor = a.status === 'active' ? 'green' : (a.status === 'failed' ? 'red' : 'var(--muted)');
+          accountsHtml += `<div style="padding:6px 0;border-bottom:1px solid var(--line)">`;
+          accountsHtml += `<span style="color:${statusColor}">${a.status === 'active' ? '✓' : (a.status === 'failed' ? '✗' : '⏳')}</span> `;
+          accountsHtml += `<strong>${a.username}</strong>`;
+          if (a.email) accountsHtml += ` - ${a.email}`;
+          if (a.password && a.status === 'active') accountsHtml += ` - <code style="background:#def3e8;padding:2px 6px;border-radius:3px">${a.password}</code>`;
+          if (a.error) accountsHtml += `<br><span style="color:var(--red);font-size:12px">${a.error}</span>`;
+          accountsHtml += `</div>`;
+        }
+        accountsHtml += '</div>';
+      } else {
+        accountsHtml = '<li>无账号</li>';
+      }
+      
       document.getElementById('account-detail-content').innerHTML = `
         <p><strong>任务ID:</strong> ${data.id}</p>
         <p><strong>状态:</strong> ${data.status}</p>
         <p><strong>总数:</strong> ${data.total_accounts}</p>
         <p><strong>完成:</strong> ${data.completed_accounts}</p>
-        <p><strong>成功:</strong> ${data.successful_accounts}</p>
-        <p><strong>失败:</strong> ${data.failed_accounts}</p>
+        <p><strong>成功:</strong> <span style="color:var(--green)">${data.successful_accounts}</span></p>
+        <p><strong>失败:</strong> <span style="color:var(--red)">${data.failed_accounts}</span></p>
         <p><strong>创建时间:</strong> ${data.created_at}</p>
         ${data.error ? `<p style="color:var(--red)"><strong>错误:</strong> ${data.error}</p>` : ''}
-        <details style="margin-top:12px">
+        <details style="margin-top:12px" open>
           <summary>账号列表 (${data.accounts?.length || 0})</summary>
-          <ul style="margin-top:8px;padding-left:20px;font-size:13px">${accountsHtml}</ul>
+          ${accountsHtml}
         </details>
       `;
       document.getElementById('account-detail-modal').classList.add('active');
+      
+      // Auto-refresh if batch is still running
+      if (data.status === 'running' || data.status === 'pending') {
+        setTimeout(() => viewBatch(batchId), 3000);
+      }
     }
     
     // Account management
@@ -1213,8 +1281,50 @@ DASHBOARD_HTML = """<!doctype html>
           html += `<p${isPassword ? ' style="background:#def3e8;padding:4px 8px;border-radius:4px"' : ''}><strong>${key}:</strong> ${value}</p>`;
         }
       }
+      
+      // Fetch and display real-time registration progress
+      try {
+        const progressResp = await fetch('/api/accounts/' + accountId + '/progress');
+        const progress = await progressResp.json();
+        if (progress.steps && progress.steps.length > 0) {
+          html += '<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line)">';
+          html += '<strong>注册进度:</strong>';
+          html += '<div class="steps" style="margin-top:8px">';
+          const stepLabels = {
+            'turnstile_token_acquisition': '🔑 Turnstile验证',
+            'email_creation': '📧 创建邮箱',
+            'browser_navigation': '🌐 浏览器导航',
+            'form_submission': '📝 提交表单',
+            'verification_email_retrieval': '📬 获取验证邮件',
+            'verification_completion': '✅ 完成验证'
+          };
+          for (const step of progress.steps) {
+            const label = stepLabels[step.name] || step.name;
+            const cls = step.success === true ? 'ok' : (step.success === false ? 'no' : '');
+            const status = step.success === true ? '✓' : (step.success === false ? '✗' : '⏳');
+            html += `<span class="step ${cls}" title="${step.message || ''}">${status} ${label}${step.duration ? ' (' + step.duration.toFixed(1) + 's)' : ''}</span>`;
+          }
+          html += '</div>';
+          if (progress.current_step) {
+            const currentLabel = stepLabels[progress.current_step] || progress.current_step;
+            html += `<p class="hint" style="margin-top:8px">当前步骤: ${currentLabel}</p>`;
+          }
+          if (progress.error) {
+            html += `<p style="color:var(--red);margin-top:8px"><strong>错误:</strong> ${progress.error}</p>`;
+          }
+          html += '</div>';
+        }
+      } catch (e) {
+        // Ignore progress fetch errors
+      }
+      
       document.getElementById('account-detail-content').innerHTML = html;
       document.getElementById('account-detail-modal').classList.add('active');
+      
+      // Auto-refresh progress if account is still registering
+      if (data.status === 'registering' || data.status === 'pending') {
+        setTimeout(() => viewAccount(accountId), 2000);
+      }
     }
     
     async function registerAccount(accountId) {
