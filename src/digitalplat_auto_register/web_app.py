@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import tempfile
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -37,6 +38,12 @@ _URL_CREDENTIAL = re.compile(r"(?i)(https?://[^\s:/]+:)[^@\s/]+@")
 
 def _timestamp() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _generate_phone_number() -> str:
+    """Return the API-required +<calling-code>-<digits> format."""
+    subscriber_number = 2_000_000_000 + secrets.randbelow(8_000_000_000)
+    return f"+1-{subscriber_number:010d}"
 
 
 def _safe_text(value: Any, limit: int = 1000) -> Optional[str]:
@@ -192,6 +199,7 @@ class RegistrationManager:
         try:
             result = await register_with_defaults(
                 referral_code=DEFAULT_REFERRAL_CODE,
+                phone=_generate_phone_number(),
                 on_step_complete=on_step_complete,
             )
             job.result = _safe_result(result)

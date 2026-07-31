@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 
 from fastapi.testclient import TestClient
 
@@ -29,8 +30,9 @@ def completed_result():
 
 
 def test_success_is_persisted_and_redacted(tmp_path, monkeypatch):
-    async def fake_register(referral_code, on_step_complete):
+    async def fake_register(referral_code, phone, on_step_complete):
         assert referral_code == web_app.DEFAULT_REFERRAL_CODE
+        assert re.fullmatch(r"\+1-\d{10}", phone)
         on_step_complete(
             StepResult(
                 name="email_creation",
@@ -71,7 +73,8 @@ def test_success_is_persisted_and_redacted(tmp_path, monkeypatch):
 
 
 def test_failure_is_persisted_without_secret_value(tmp_path, monkeypatch):
-    async def fake_register(referral_code, on_step_complete):
+    async def fake_register(referral_code, phone, on_step_complete):
+        assert re.fullmatch(r"\+1-\d{10}", phone)
         raise RuntimeError(
             "Authorization: Bearer secret-credential-not-for-output "
             "via http://proxy-user:proxy-password@example.test"
@@ -91,7 +94,8 @@ def test_failure_is_persisted_without_secret_value(tmp_path, monkeypatch):
 def test_post_jobs_returns_conflict_while_task_is_active(tmp_path, monkeypatch):
     release = asyncio.Event()
 
-    async def slow_register(referral_code, on_step_complete):
+    async def slow_register(referral_code, phone, on_step_complete):
+        assert re.fullmatch(r"\+1-\d{10}", phone)
         await release.wait()
         return completed_result()
 
@@ -172,3 +176,8 @@ def test_routes_return_dashboard_health_and_overview_without_sensitive_fields(tm
         field not in overview.text
         for field in ("password", "console_logs", "turnstile", "proxy_password")
     )
+
+
+def test_generated_phone_matches_registration_api_format():
+    for _ in range(20):
+        assert re.fullmatch(r"\+1-\d{10}", web_app._generate_phone_number())
