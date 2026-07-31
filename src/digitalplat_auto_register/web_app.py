@@ -562,6 +562,13 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard() -> str:
+        # Keep the original account-registration console as the primary entry
+        # point.  Domain API automation is an additive module at
+        # ``/domain-automation`` and must not replace the existing workflow.
+        return DASHBOARD_HTML
+
+    @app.get("/domain-automation", response_class=HTMLResponse)
+    async def domain_automation_dashboard() -> str:
         return DOMAIN_AUTOMATION_HTML
 
     @app.get("/health")
@@ -928,6 +935,135 @@ def create_app(
         account.metadata["current_step"] = None
         await account_store.save()
 
+    # ==================== Account-based Domain Registration (Legacy) ====================
+
+    @app.get("/api/domains")
+    async def list_domains() -> Dict[str, Any]:
+        """List domains registered through the original account workflow."""
+        accounts = account_store.get_accounts_by_status(AccountStatus.ACTIVE)
+        domains = []
+        for account in accounts:
+            for domain in account.metadata.get("domains", []):
+                domains.append({
+                    "username": account.username,
+                    "domain": domain.get("domain"),
+                    "registered_at": domain.get("registered_at"),
+                    "nameservers": domain.get("nameservers", []),
+                })
+        return {"total": len(domains), "domains": domains}
+
+    @app.post("/api/domains/register")
+    async def register_domain(request: Dict[str, Any]) -> Dict[str, Any]:
+        """Register a domain through the original account/browser workflow."""
+        from .services.domain_registrar import register_domain_with_defaults
+
+        username = request.get("username")
+        password = request.get("password")
+        domain_prefix = request.get("domain_prefix")
+        domain_suffix = request.get("domain_suffix", "dpdns.org")
+        nameservers = request.get("nameservers")
+        proxy = request.get("proxy")
+
+        if not username or not domain_prefix:
+            raise HTTPException(
+                status_code=400,
+                detail="username and domain_prefix are required",
+            )
+
+        if not password:
+            accounts = account_store.get_accounts_by_status(AccountStatus.ACTIVE)
+            password = next(
+                (account.password for account in accounts if account.username == username),
+                None,
+            )
+            if not password:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Account '{username}' not found or has no saved password",
+                )
+
+        result = await register_domain_with_defaults(
+            username=username,
+            password=password,
+            domain_prefix=domain_prefix,
+            domain_suffix=domain_suffix,
+            nameservers=nameservers,
+            proxy=proxy,
+        )
+
+        if result.success:
+            accounts = account_store.get_accounts_by_status(AccountStatus.ACTIVE)
+            for account in accounts:
+                if account.username == username:
+                    account.metadata.setdefault("domains", []).append({
+                        "domain": f"{domain_prefix}.{domain_suffix}",
+                        "registered_at": result.registered_at,
+                        "nameservers": result.nameservers,
+                    })
+                    await account_store.save()
+                    break
+
+        return {
+            "success": result.success,
+            "domain": result.domain,
+            "message": result.message,
+            "steps": result.steps,
+            "error": result.error,
+        }
+
+    @app.post("/api/domains/check")
+    async def check_domain(request: Dict[str, Any]) -> Dict[str, Any]:
+        """Check availability through the original account/browser workflow."""
+        from .services.domain_registrar import DomainRegistrar, DomainRegistrationConfig
+
+        username = request.get("username")
+        password = request.get("password")
+        domain_prefix = request.get("domain_prefix")
+        domain_suffix = request.get("domain_suffix", "dpdns.org")
+
+        if not username or not domain_prefix:
+            raise HTTPException(
+                status_code=400,
+                detail="username and domain_prefix are required",
+            )
+
+        if not password:
+            accounts = account_store.get_accounts_by_status(AccountStatus.ACTIVE)
+            password = next(
+                (account.password for account in accounts if account.username == username),
+                None,
+            )
+            if not password:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Account '{username}' not found or has no saved password",
+                )
+
+        registrar = DomainRegistrar(DomainRegistrationConfig(
+            username=username,
+            password=password,
+            domain_prefix=domain_prefix,
+            domain_suffix=domain_suffix,
+        ))
+        await registrar._init_browser(headless=True)
+
+        try:
+            login_result = await registrar.login()
+            if not login_result.success:
+                return {
+                    "available": False,
+                    "domain": f"{domain_prefix}.{domain_suffix}",
+                    "message": f"Login failed: {login_result.error}",
+                }
+            check_result = await registrar.check_domain_availability()
+            return {
+                "available": check_result.available,
+                "domain": check_result.domain,
+                "message": check_result.message,
+            }
+        finally:
+            await registrar._close_browser()
+
     # ==================== Domain API Automation ====================
 
     @app.get("/api/domain-automation")
@@ -1106,6 +1242,8 @@ DASHBOARD_HTML = """<!doctype html>
     nav { margin:0 -28px 26px; padding:0 28px; background:#fff; border-bottom:1px solid var(--line); gap:22px; }
     nav button { padding:16px 2px 13px; border-bottom-width:2px; font-size:14px; }
     nav button:hover { background:transparent; }
+    nav .module-link { margin-left:auto; align-self:center; padding:8px 13px; border-radius:7px; background:var(--green-soft); color:var(--green); font-size:13px; font-weight:650; text-decoration:none; transition:background .15s ease,transform .15s ease; }
+    nav .module-link:hover { background:#d8eee4; transform:translateY(-1px); }
     .tab-content { padding-top:0; animation:contentIn .22s ease-out; }
     @keyframes contentIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
     .metrics { border:0; border-bottom:1px solid var(--line); background:transparent; gap:0; margin:0 0 28px; }
@@ -1177,6 +1315,9 @@ DASHBOARD_HTML = """<!doctype html>
     @media (max-width:700px) {
       main { padding-left:14px; padding-right:14px; }
       header, nav { margin-left:-14px; margin-right:-14px; padding-left:14px; padding-right:14px; }
+      nav { gap:14px; overflow-x:auto; }
+      nav button { white-space:nowrap; }
+      nav .module-link { margin-left:0; white-space:nowrap; }
       .metrics { grid-template-columns:repeat(2,1fr); }
       .metric { border-bottom:1px solid var(--line); }
       .account-progress summary { grid-template-columns:1fr auto; }
@@ -1199,8 +1340,9 @@ DASHBOARD_HTML = """<!doctype html>
       <button class="active" onclick="showTab('dashboard', this)">📊 概览</button>
       <button onclick="showTab('batch', this)">🚀 批量注册</button>
       <button onclick="showTab('accounts', this)">👤 账号管理</button>
-      <button onclick="showTab('domains', this)">🌐 域名注册</button>
+      <button onclick="showTab('domains', this)">🌐 账号域名注册</button>
       <button onclick="showTab('history', this)">📜 任务记录</button>
+      <a class="module-link" href="/domain-automation">API 域名自动注册 →</a>
     </nav>
 
     <!-- Dashboard Tab -->
@@ -1353,7 +1495,7 @@ DASHBOARD_HTML = """<!doctype html>
     <!-- Domain Registration Tab -->
     <div id="tab-domains" class="tab-content">
       <div class="card">
-        <div class="card-header">注册免费域名 (DigitalPlat)</div>
+        <div class="card-header">通过已注册账号申请域名（原功能）</div>
         <div class="card-body">
           <p class="hint" style="margin-bottom:16px">
             支持 .dpdns.org / .us.kg / .xx.kg / .qzz.io / .qd.je 等免费后缀。每个账号限注册1个免费域名。
@@ -2089,6 +2231,9 @@ DOMAIN_AUTOMATION_HTML = """<!doctype html>
     header { background:#14231d;color:#fff;padding:25px max(24px,calc((100vw - 1420px)/2));display:flex;align-items:center;justify-content:space-between;gap:24px; }
     h1 { margin:0;font-size:25px;letter-spacing:-.02em; }
     .subtitle { color:#afbeb7;font-size:13px;margin-top:5px; }
+    .header-actions { display:flex;align-items:center;gap:18px; }
+    .back-link { color:#e0ebe6;text-decoration:none;font-size:13px;font-weight:600;padding:8px 12px;border:1px solid #40534a;border-radius:7px;transition:.15s; }
+    .back-link:hover { background:#20372d;border-color:#5b7368;transform:translateY(-1px); }
     #connection { color:#b9c8c1;font-size:12px;display:flex;align-items:center;gap:8px; }
     #connection::before { content:"";width:8px;height:8px;border-radius:50%;background:#42d39a;box-shadow:0 0 0 4px rgba(66,211,154,.13); }
     main { max-width:1420px;margin:0 auto;padding:28px 24px 60px; }
@@ -2131,11 +2276,11 @@ DOMAIN_AUTOMATION_HTML = """<!doctype html>
     .toast { position:fixed;right:20px;top:20px;z-index:20;padding:12px 16px;color:#fff;border-radius:8px;background:#14231d;box-shadow:0 10px 30px rgba(0,0,0,.18);font-size:13px; }
     @keyframes pulse { 50% { opacity:.45; } }
     @media(max-width:900px){.layout{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}.metric{border-bottom:1px solid var(--line)}.job summary{grid-template-columns:1fr auto}.job summary .job-progress{grid-column:1/-1}.attempt summary{grid-template-columns:1fr auto}.attempt summary .attempt-token{grid-column:1/-1}.steps{grid-template-columns:1fr}.step{padding:3px 0 17px 35px}.step::before{left:8px;right:auto;top:12px;bottom:-5px;width:2px;height:auto}.step:last-child::before{display:none}}
-    @media(max-width:600px){header{padding:21px 16px}main{padding:22px 14px 50px}.form-grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric{padding:8px 12px 15px}.metric-value{font-size:25px}}
+    @media(max-width:600px){header{padding:18px 16px;align-items:flex-start}.header-actions{align-items:flex-end;flex-direction:column;gap:8px}.back-link{padding:6px 9px}main{padding:22px 14px 50px}.form-grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric{padding:8px 12px 15px}.metric-value{font-size:25px}}
   </style>
 </head>
 <body>
-  <header><div><h1>DigitalPlat 域名自动注册</h1><div class="subtitle">多 Token 调度 · 前缀订阅 · 注册结果回查</div></div><div id="connection">正在连接</div></header>
+  <header><div><h1>DigitalPlat 域名自动注册</h1><div class="subtitle">新增模块 · 多 Token 调度 · 前缀订阅 · 注册结果回查</div></div><div class="header-actions"><a class="back-link" href="/">← 返回原控制台</a><div id="connection">正在连接</div></div></header>
   <main>
     <section class="metrics">
       <div class="metric"><div class="metric-label">API Token</div><div class="metric-value" id="stat-tokens">0</div></div>

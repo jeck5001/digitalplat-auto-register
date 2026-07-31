@@ -113,7 +113,7 @@ def test_web_api_never_returns_raw_tokens_and_serves_domain_console(tmp_path):
 
     with TestClient(app) as client:
         overview = client.get("/api/domain-automation")
-        dashboard = client.get("/")
+        dashboard = client.get("/domain-automation")
 
     assert overview.status_code == 200
     assert "dp_test_token_a_123456" not in overview.text
