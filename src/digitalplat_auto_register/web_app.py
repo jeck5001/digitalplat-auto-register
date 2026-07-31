@@ -1,5 +1,6 @@
 """Web management console for batch DigitalPlat registrations and account management."""
 
+import argparse
 import asyncio
 import json
 import os
