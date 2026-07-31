@@ -55,6 +55,10 @@ CLOUDFLARE_STEP_LABELS = {
     "digitalplat_delegation": "更新 DigitalPlat Nameservers",
     "cloudflare_activation": "确认 Cloudflare 托管状态",
 }
+DEFAULT_RENEW_BEFORE_DAYS = 120
+DEFAULT_RENEWAL_INTERVAL_SECONDS = 24 * 60 * 60
+DEFAULT_RENEWAL_DELAY_MIN_SECONDS = 3.0
+DEFAULT_RENEWAL_DELAY_MAX_SECONDS = 6.0
 
 
 def _timestamp() -> str:
@@ -286,6 +290,14 @@ class DigitalPlatDomainClient:
             raise DigitalPlatAPIError("DigitalPlat domain list has an unexpected shape")
         return [item for item in payload if isinstance(item, dict)]
 
+    def get_domain(self, domain: str) -> Dict[str, Any]:
+        payload = self._request("GET", f"/domains/{quote(domain, safe='')}")
+        if isinstance(payload, dict):
+            payload = payload.get("domain", payload)
+        if not isinstance(payload, dict):
+            raise DigitalPlatAPIError("DigitalPlat domain detail has an unexpected shape")
+        return payload
+
     def register_domain(
         self,
         domain: str,
@@ -315,6 +327,19 @@ class DigitalPlatDomainClient:
         )
         if not isinstance(payload, dict):
             raise DigitalPlatAPIError("DigitalPlat nameserver response has an unexpected shape")
+        return payload
+
+    def renew_domain(self, domain: str, renewal_type: str, years: int) -> Dict[str, Any]:
+        payload = self._request(
+            "POST",
+            f"/domains/{quote(domain, safe='')}/renew",
+            {"renewal_type": renewal_type, "years": years},
+            mutation=True,
+        )
+        if isinstance(payload, dict):
+            payload = payload.get("domain", payload)
+        if not isinstance(payload, dict):
+            raise DigitalPlatAPIError("DigitalPlat renewal response has an unexpected shape")
         return payload
 
 
@@ -386,6 +411,24 @@ class CloudflareSettings:
 
 
 @dataclass
+class RenewalSettings:
+    enabled: bool = True
+    renew_before_days: int = DEFAULT_RENEW_BEFORE_DAYS
+    renewal_type: str = "free"
+    renewal_years: int = 1
+    interval_seconds: int = DEFAULT_RENEWAL_INTERVAL_SECONDS
+    delay_min_seconds: float = DEFAULT_RENEWAL_DELAY_MIN_SECONDS
+    delay_max_seconds: float = DEFAULT_RENEWAL_DELAY_MAX_SECONDS
+    last_run_at: Optional[str] = None
+    last_status: str = "untested"
+    last_error: Optional[str] = None
+    last_summary: Optional[Dict[str, Any]] = None
+
+    def safe_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class DomainAttempt:
     domain: str
     token_id: str
@@ -416,6 +459,8 @@ class DomainRegistrationJob:
     successful_domains: int = 0
     failed_attempts: int = 0
     max_attempts: int = 0
+    delay_min_seconds: float = 20.0
+    delay_max_seconds: float = 45.0
     attempts: List[DomainAttempt] = field(default_factory=list)
     error: Optional[str] = None
 
@@ -435,6 +480,7 @@ class DomainAutomationStore:
         self.jobs: Dict[str, DomainRegistrationJob] = {}
         self.domains: List[Dict[str, Any]] = []
         self.cloudflare: Optional[CloudflareSettings] = None
+        self.renewal = RenewalSettings()
         self.loaded = False
 
     async def load(self) -> None:
@@ -465,6 +511,12 @@ class DomainAutomationStore:
                 key: value for key, value in raw_cloudflare.items()
                 if key in CloudflareSettings.__dataclass_fields__
             })
+        raw_renewal = payload.get("renewal")
+        if isinstance(raw_renewal, dict):
+            self.renewal = RenewalSettings(**{
+                key: value for key, value in raw_renewal.items()
+                if key in RenewalSettings.__dataclass_fields__
+            })
         for raw in payload.get("jobs", []):
             attempts = [DomainAttempt(**attempt) for attempt in raw.pop("attempts", [])]
             job = DomainRegistrationJob(**{
@@ -488,6 +540,7 @@ class DomainAutomationStore:
             "jobs": [item.to_dict() for item in self.jobs.values()],
             "domains": self.domains,
             "cloudflare": asdict(self.cloudflare) if self.cloudflare else None,
+            "renewal": asdict(self.renewal),
             "saved_at": _timestamp(),
         }
         fd, temporary_path = tempfile.mkstemp(
@@ -527,6 +580,25 @@ class DomainAutomationManager:
         self.cloudflare_api_base = os.getenv(
             "CLOUDFLARE_API_BASE", DEFAULT_CLOUDFLARE_API_BASE
         )
+        self.cloudflare_delay_min = max(0.0, float(os.getenv("CLOUDFLARE_OPERATION_DELAY_MIN", "3")))
+        self.cloudflare_delay_max = max(
+            self.cloudflare_delay_min,
+            float(os.getenv("CLOUDFLARE_OPERATION_DELAY_MAX", "8")),
+        )
+        self._cloudflare_last_started = 0.0
+        self._cloudflare_lock = asyncio.Lock()
+        self.renewal_task: Optional[asyncio.Task] = None
+        self._renewal_lock = asyncio.Lock()
+
+    async def _wait_cloudflare_operation(self) -> None:
+        async with self._cloudflare_lock:
+            now = asyncio.get_running_loop().time()
+            if self._cloudflare_last_started:
+                delay = random.uniform(self.cloudflare_delay_min, self.cloudflare_delay_max)
+                remaining = delay - (now - self._cloudflare_last_started)
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+            self._cloudflare_last_started = asyncio.get_running_loop().time()
 
     @staticmethod
     def validate_token(token: str) -> str:
@@ -544,6 +616,46 @@ class DomainAutomationManager:
         if len(api_token) < 20 or any(character.isspace() for character in api_token):
             raise ValueError("Cloudflare API Token is invalid")
         return {"account_id": account_id, "api_token": api_token}
+
+    @staticmethod
+    def normalize_renewal_settings(request: Dict[str, Any]) -> Dict[str, Any]:
+        def integer(name: str, default: int, minimum: int, maximum: int) -> int:
+            value = request.get(name, default)
+            if isinstance(value, bool):
+                raise ValueError(f"{name} must be an integer")
+            try:
+                value = int(value)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"{name} must be an integer") from error
+            if not minimum <= value <= maximum:
+                raise ValueError(f"{name} must be between {minimum} and {maximum}")
+            return value
+
+        def decimal(name: str, default: float) -> float:
+            try:
+                value = float(request.get(name, default))
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"{name} must be a number") from error
+            if value < 0 or value > 3600:
+                raise ValueError(f"{name} must be between 0 and 3600")
+            return value
+
+        renewal_type = str(request.get("renewal_type", "free")).strip().lower()
+        if renewal_type not in {"free", "paid"}:
+            raise ValueError("renewal_type must be free or paid")
+        delay_min = decimal("delay_min_seconds", DEFAULT_RENEWAL_DELAY_MIN_SECONDS)
+        delay_max = decimal("delay_max_seconds", DEFAULT_RENEWAL_DELAY_MAX_SECONDS)
+        if delay_max < delay_min:
+            raise ValueError("delay_max_seconds must be greater than or equal to delay_min_seconds")
+        return {
+            "enabled": bool(request.get("enabled", True)),
+            "renew_before_days": integer("renew_before_days", DEFAULT_RENEW_BEFORE_DAYS, 0, 3650),
+            "renewal_type": renewal_type,
+            "renewal_years": integer("renewal_years", 1, 1, 5),
+            "interval_seconds": integer("interval_seconds", DEFAULT_RENEWAL_INTERVAL_SECONDS, 60, 31_536_000),
+            "delay_min_seconds": delay_min,
+            "delay_max_seconds": delay_max,
+        }
 
     def _cloudflare_client(self) -> CloudflareClient:
         settings = self.store.cloudflare
@@ -571,6 +683,180 @@ class DomainAutomationManager:
         return settings.safe_dict()
 
     @staticmethod
+    def _parse_expiry(value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        text = str(value).strip()
+        try:
+            if len(text) == 8 and text.isdigit():
+                parsed = datetime.strptime(text, "%Y%m%d")
+            elif len(text) == 10:
+                parsed = datetime.strptime(text, "%Y-%m-%d")
+            else:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed.astimezone() if parsed.tzinfo else parsed.astimezone()
+
+    @classmethod
+    def _days_remaining(cls, record: Dict[str, Any]) -> Optional[int]:
+        value = next(
+            (record.get(key) for key in ("expiry_date", "expires_at", "expiryDate", "expiresAt", "expiration_date") if record.get(key)),
+            None,
+        )
+        expiry = cls._parse_expiry(value)
+        if not expiry:
+            return None
+        return (expiry.date() - datetime.now().astimezone().date()).days
+
+    async def run_renewal(self, force: bool = False) -> Dict[str, Any]:
+        async with self._renewal_lock:
+            settings = self.store.renewal
+            if not settings.enabled and not force:
+                return {"status": "disabled", "checked": 0, "renewed": 0, "skipped": 0, "failed": 0}
+            checked = renewed_count = skipped = failed = 0
+            errors: List[Dict[str, str]] = []
+            for token in self.store.tokens.values():
+                if not token.enabled:
+                    continue
+                client = self.client_factory(token.token, self.api_base)
+                try:
+                    inventory = await _run_sync(client.list_domains)
+                except DigitalPlatAPIError as error:
+                    failed += 1
+                    errors.append({"token": token.name, "error": str(error)})
+                    continue
+                for item in inventory:
+                    domain = str(item.get("name") or item.get("domain") or "").strip().lower().rstrip(".")
+                    if not HOSTNAME_PATTERN.fullmatch(domain):
+                        continue
+                    checked += 1
+                    record = next((d for d in self.store.domains if str(d.get("domain", "")).lower() == domain), None)
+                    if record is None:
+                        record = {
+                            "domain": domain,
+                            "token_id": token.id,
+                            "token_name": token.name,
+                            "subscription_id": None,
+                            "slot_type": item.get("slot_type") or item.get("lifecycle_type") or "unknown",
+                            "nameservers": item.get("nameservers", []),
+                            "registered_at": item.get("registration_date") or _timestamp(),
+                            "status": item.get("status", "ok"),
+                            "source": "renewal_sync",
+                        }
+                        self.store.domains.append(record)
+                    record["renewal_checked_at"] = _timestamp()
+                    if self._days_remaining(item) is None:
+                        try:
+                            item = await _run_sync(client.get_domain, domain)
+                        except DigitalPlatAPIError as error:
+                            record["renewal_status"] = "failed"
+                            record["renewal_error"] = _safe_error(error)
+                            failed += 1
+                            errors.append({"domain": domain, "token": token.name, "error": str(error)})
+                            continue
+                    days_remaining = self._days_remaining(item)
+                    record["expiry_date"] = next(
+                        (item.get(key) for key in ("expiry_date", "expires_at", "expiryDate", "expiresAt", "expiration_date") if item.get(key)),
+                        record.get("expiry_date"),
+                    )
+                    record["renewal_days_remaining"] = days_remaining
+                    can_renew = next(
+                        (item.get(key) for key in ("can_free_renew", "can_renew", "renewable") if key in item),
+                        None,
+                    )
+                    if isinstance(can_renew, str):
+                        can_renew = can_renew.strip().lower() in {"1", "true", "yes", "y"}
+                    if can_renew is False:
+                        record["renewal_status"] = "skipped"
+                        skipped += 1
+                        continue
+                    if not force and (days_remaining is None or days_remaining > settings.renew_before_days):
+                        record["renewal_status"] = "skipped"
+                        skipped += 1
+                        continue
+                    previous_expiry = self._parse_expiry(record.get("expiry_date"))
+                    try:
+                        renewed_record = await _run_sync(
+                            client.renew_domain,
+                            domain,
+                            settings.renewal_type,
+                            settings.renewal_years,
+                        )
+                        record["renewal_status"] = "renewed"
+                        record["renewal_error"] = None
+                        record["expiry_date"] = next(
+                            (renewed_record.get(key) for key in ("expiry_date", "expires_at", "expiryDate", "expiresAt", "expiration_date") if renewed_record.get(key)),
+                            record.get("expiry_date"),
+                        )
+                        record["renewed_at"] = _timestamp()
+                        renewed_count += 1
+                    except DigitalPlatAPIError as error:
+                        reconciled = False
+                        if error.ambiguous:
+                            try:
+                                detail = await _run_sync(client.get_domain, domain)
+                                current_expiry = self._parse_expiry(next(
+                                    (detail.get(key) for key in ("expiry_date", "expires_at", "expiryDate", "expiresAt", "expiration_date") if detail.get(key)),
+                                    None,
+                                ))
+                                reconciled = bool(current_expiry and previous_expiry and current_expiry > previous_expiry)
+                                if reconciled:
+                                    record["expiry_date"] = current_expiry.date().isoformat()
+                            except DigitalPlatAPIError:
+                                reconciled = False
+                        if reconciled:
+                            record["renewal_status"] = "renewed"
+                            record["renewal_error"] = None
+                            record["renewed_at"] = _timestamp()
+                            renewed_count += 1
+                        else:
+                            record["renewal_status"] = "failed"
+                            record["renewal_error"] = _safe_error(error)
+                            failed += 1
+                            errors.append({"domain": domain, "token": token.name, "error": str(error)})
+                    delay = random.uniform(settings.delay_min_seconds, settings.delay_max_seconds)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+            summary = {
+                "status": "completed" if not errors else "completed_with_errors",
+                "checked": checked,
+                "renewed": renewed_count,
+                "skipped": skipped,
+                "failed": failed,
+                "errors": errors[:50],
+            }
+            settings.last_run_at = _timestamp()
+            settings.last_status = summary["status"]
+            settings.last_error = errors[0]["error"] if errors else None
+            settings.last_summary = summary
+            await self.store.save()
+            return summary
+
+    async def start_renewal_scheduler(self) -> None:
+        if self.renewal_task and not self.renewal_task.done():
+            return
+        self.renewal_task = asyncio.create_task(self._renewal_loop())
+
+    async def stop_renewal_scheduler(self) -> None:
+        if self.renewal_task and not self.renewal_task.done():
+            self.renewal_task.cancel()
+            try:
+                await self.renewal_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _renewal_loop(self) -> None:
+        while True:
+            await asyncio.sleep(max(60, self.store.renewal.interval_seconds))
+            try:
+                await self.run_renewal()
+            except Exception as error:
+                self.store.renewal.last_status = "failed"
+                self.store.renewal.last_error = _safe_error(error)
+                await self.store.save()
+
+    @staticmethod
     def _cloudflare_step(name: str, status: str, message: str) -> Dict[str, Any]:
         return {
             "name": name,
@@ -593,6 +879,7 @@ class DomainAutomationManager:
         if not token:
             raise ValueError("The DigitalPlat API Token for this domain is missing")
 
+        await self._wait_cloudflare_operation()
         record["cloudflare_status"] = "running"
         record["cloudflare_error"] = None
         record["cloudflare_steps"] = []
@@ -769,6 +1056,10 @@ class DomainAutomationManager:
                         "nameservers": nameservers,
                         "registered_at": item.get("registration_date") or _timestamp(),
                         "status": item.get("status", "ok"),
+                        "expiry_date": next(
+                            (item.get(key) for key in ("expiry_date", "expires_at", "expiryDate", "expiresAt", "expiration_date") if item.get(key)),
+                            None,
+                        ),
                         "source": "digitalplat_sync",
                     }
                     self.store.domains.append(record)
@@ -780,6 +1071,10 @@ class DomainAutomationManager:
                     if nameservers:
                         record["nameservers"] = nameservers
                     record["status"] = item.get("status", record.get("status", "ok"))
+                    record["expiry_date"] = next(
+                        (item.get(key) for key in ("expiry_date", "expires_at", "expiryDate", "expiresAt", "expiration_date") if item.get(key)),
+                        record.get("expiry_date"),
+                    )
         await self.store.save()
         return {
             "synced": synced,
@@ -810,6 +1105,8 @@ class DomainAutomationManager:
         target_count: int,
         token_ids: Optional[List[str]] = None,
         max_attempts: Optional[int] = None,
+        delay_min_seconds: float = 20.0,
+        delay_max_seconds: float = 45.0,
     ) -> DomainRegistrationJob:
         subscription = self.store.subscriptions.get(subscription_id)
         if not subscription or not subscription.enabled:
@@ -824,11 +1121,20 @@ class DomainAutomationManager:
             raise ValueError("Target count must be between 1 and 100")
         attempt_limit = max_attempts or target_count * 10
         attempt_limit = max(target_count, min(int(attempt_limit), 1000))
+        try:
+            delay_min_seconds = float(delay_min_seconds)
+            delay_max_seconds = float(delay_max_seconds)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Domain delay must be a number") from error
+        if delay_min_seconds < 0 or delay_max_seconds < delay_min_seconds or delay_max_seconds > 3600:
+            raise ValueError("Domain delay must satisfy 0 <= minimum <= maximum <= 3600")
         job = DomainRegistrationJob(
             subscription_id=subscription_id,
             target_count=target_count,
             token_ids=selected,
             max_attempts=attempt_limit,
+            delay_min_seconds=delay_min_seconds,
+            delay_max_seconds=delay_max_seconds,
         )
         self.store.jobs[job.id] = job
         await self.store.save()
@@ -955,6 +1261,14 @@ class DomainAutomationManager:
                     job.completed_attempts += 1
                     await self.store.save()
 
+                if (
+                    job.successful_domains < job.target_count
+                    and job.completed_attempts < job.max_attempts
+                ):
+                    delay = random.uniform(job.delay_min_seconds, job.delay_max_seconds)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+
             job.status = "completed" if job.successful_domains >= job.target_count else "failed"
             if job.status == "failed" and not job.error:
                 job.error = f"Stopped after {job.completed_attempts} attempts with {job.successful_domains} successful registrations"
@@ -976,6 +1290,7 @@ class DomainAutomationManager:
             "jobs": [item.to_dict() for item in jobs[:50]],
             "domains": list(reversed(self.store.domains[-200:])),
             "cloudflare": self.store.cloudflare.safe_dict() if self.store.cloudflare else None,
+            "renewal": self.store.renewal.safe_dict(),
             "stats": {
                 "tokens": len(self.store.tokens),
                 "enabled_tokens": sum(item.enabled for item in self.store.tokens.values()),

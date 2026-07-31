@@ -48,6 +48,15 @@ class FakeDomainClient:
         })
         return {"name": domain, "nameservers": nameservers}
 
+    def renew_domain(self, domain, renewal_type, years):
+        for item in self.inventory.setdefault(self.token, []):
+            if str(item.get("name") or item.get("domain")) == domain:
+                item["expiry_date"] = "2030-01-01"
+                item["renewal_type"] = renewal_type
+                item["renewal_years"] = years
+                return item
+        raise DigitalPlatAPIError("domain not found", 404)
+
 
 class FakeCloudflareClient:
     zones = {}
@@ -101,7 +110,7 @@ def test_multi_token_job_changes_candidate_after_registration_conflict(tmp_path)
     store, manager, subscription = build_manager(tmp_path)
 
     async def run_job():
-        job = await manager.start_job(subscription.id, target_count=1, max_attempts=3)
+        job = await manager.start_job(subscription.id, target_count=1, max_attempts=3, delay_min_seconds=0, delay_max_seconds=0)
         await manager.tasks[job.id]
         return job
 
@@ -125,7 +134,7 @@ def test_ambiguous_registration_is_reconciled_without_retry(tmp_path):
     FakeDomainClient.ambiguous_domains = {fixed_domain}
 
     async def run_job():
-        job = await manager.start_job(subscription.id, target_count=1, max_attempts=3)
+        job = await manager.start_job(subscription.id, target_count=1, max_attempts=3, delay_min_seconds=0, delay_max_seconds=0)
         await manager.tasks[job.id]
         return job
 
@@ -256,6 +265,8 @@ def test_existing_domain_can_be_hosted_on_cloudflare(tmp_path):
         FakeDomainClient,
         FakeCloudflareClient,
     )
+    manager.cloudflare_delay_min = 0
+    manager.cloudflare_delay_max = 0
 
     record = asyncio.run(manager.host_domain_on_cloudflare("app123.dpdns.org"))
 
@@ -291,6 +302,8 @@ def test_cloudflare_web_api_masks_token_and_hosts_domain(tmp_path):
         FakeDomainClient,
         FakeCloudflareClient,
     )
+    domain_manager.cloudflare_delay_min = 0
+    domain_manager.cloudflare_delay_max = 0
     app = create_app(
         registration_manager,
         account_store,
@@ -328,3 +341,64 @@ def test_sync_domains_imports_domains_from_each_enabled_token(tmp_path):
     assert result["synced"] == 1
     assert store.domains[0]["domain"] == "synced.dpdns.org"
     assert store.domains[0]["source"] == "digitalplat_sync"
+
+
+def test_renewal_renews_only_domains_inside_window(tmp_path):
+    from datetime import datetime, timedelta
+
+    now = datetime.now().astimezone()
+    FakeDomainClient.inventory = {
+        "dp_test_token_a_123456": [
+            {
+                "name": "soon.dpdns.org",
+                "expiry_date": (now + timedelta(days=30)).date().isoformat(),
+                "status": "ok",
+            },
+            {
+                "name": "later.dpdns.org",
+                "expiry_date": (now + timedelta(days=300)).date().isoformat(),
+                "status": "ok",
+            },
+        ],
+    }
+    store, manager, unused = build_manager(tmp_path)
+    store.renewal.renew_before_days = 120
+    store.renewal.delay_min_seconds = 0
+    store.renewal.delay_max_seconds = 0
+
+    result = asyncio.run(manager.run_renewal())
+
+    assert result["checked"] == 2
+    assert result["renewed"] == 1
+    assert result["skipped"] == 1
+    records = {item["domain"]: item for item in store.domains}
+    assert records["soon.dpdns.org"]["renewal_status"] == "renewed"
+    assert records["later.dpdns.org"]["renewal_status"] == "skipped"
+
+
+def test_renewal_web_api_saves_configuration(tmp_path):
+    account_store = AccountStore(tmp_path / "accounts.json")
+    registration_manager = RegistrationManager(account_store, tmp_path / "jobs.json")
+    domain_store, domain_manager, unused = build_manager(tmp_path)
+    app = create_app(
+        registration_manager,
+        account_store,
+        domain_store,
+        domain_manager,
+    )
+
+    with TestClient(app) as client:
+        response = client.put("/api/domain-automation/renewal", json={
+            "enabled": True,
+            "renew_before_days": 90,
+            "renewal_type": "free",
+            "renewal_years": 1,
+            "interval_seconds": 86400,
+            "delay_min_seconds": 2,
+            "delay_max_seconds": 4,
+        })
+        overview = client.get("/api/domain-automation")
+
+    assert response.status_code == 200
+    assert overview.json()["renewal"]["renew_before_days"] == 90
+    assert overview.json()["renewal"]["delay_max_seconds"] == 4.0
