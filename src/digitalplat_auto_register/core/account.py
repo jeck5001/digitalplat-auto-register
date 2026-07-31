@@ -135,6 +135,8 @@ class BatchRegistrationJob:
     
     # Settings
     delay_between_registrations: float = 5.0
+    delay_min_seconds: float = 5.0
+    delay_max_seconds: float = 10.0
     max_concurrent: int = 1
     
     # Error tracking

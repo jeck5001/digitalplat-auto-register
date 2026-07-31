@@ -135,7 +135,7 @@ def test_batch_counts_accounts_only_after_registration_finishes(tmp_path, monkey
         store = AccountStore(tmp_path / "accounts.json")
         await store.load()
         manager = web_app.RegistrationManager(store, tmp_path / "jobs.json")
-        batch = await manager.start_batch(count=2, delay=0, max_concurrent=2)
+        batch = await manager.start_batch(count=2, delay=0, delay_max=0, max_concurrent=2)
         await manager._batch_task
         return manager, store, batch
 
