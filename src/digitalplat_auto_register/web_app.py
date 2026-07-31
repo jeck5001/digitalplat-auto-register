@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 from .core.account import (
     Account, AccountStatus, AccountStore, BatchRegistrationJob
 )
+from .core.domain_automation import (
+    APITokenRecord,
+    DomainAutomationManager,
+    DomainAutomationStore,
+    PrefixSubscription,
+)
 from .core.registrar import register_with_defaults
 from .core.result import StepResult
 
@@ -520,6 +526,8 @@ class RegistrationManager:
 def create_app(
     manager: Optional[RegistrationManager] = None,
     account_store: Optional[AccountStore] = None,
+    domain_store: Optional[DomainAutomationStore] = None,
+    domain_manager: Optional[DomainAutomationManager] = None,
 ) -> FastAPI:
     """Create FastAPI application with all routes."""
     
@@ -527,13 +535,20 @@ def create_app(
         account_store = AccountStore()
     if manager is None:
         manager = RegistrationManager(account_store)
+    if domain_store is None:
+        domain_store = DomainAutomationStore()
+    if domain_manager is None:
+        domain_manager = DomainAutomationManager(domain_store)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await account_store.load()
         await manager.load()
+        await domain_store.load()
         app.state.registration_manager = manager
         app.state.account_store = account_store
+        app.state.domain_automation_store = domain_store
+        app.state.domain_automation_manager = domain_manager
         yield
 
     app = FastAPI(
@@ -547,7 +562,7 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard() -> str:
-        return DASHBOARD_HTML
+        return DOMAIN_AUTOMATION_HTML
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:
@@ -555,6 +570,7 @@ def create_app(
             "ok": True,
             "active_jobs": list(manager._active_job_ids),
             "batch_jobs": len([j for j in account_store.get_all_batch_jobs() if j.status == "running"]),
+            "domain_jobs": domain_manager.overview()["stats"]["running_jobs"],
         }
 
     # ==================== Overview & Stats ====================
@@ -912,146 +928,77 @@ def create_app(
         account.metadata["current_step"] = None
         await account_store.save()
 
-    # ==================== Domain Registration ====================
+    # ==================== Domain API Automation ====================
 
-    @app.get("/api/domains")
-    async def list_domains() -> Dict[str, Any]:
-        """List registered domains from all active accounts."""
-        accounts = account_store.get_accounts_by_status(AccountStatus.ACTIVE)
-        domains = []
-        for account in accounts:
-            account_domains = account.metadata.get("domains", [])
-            for domain in account_domains:
-                domains.append({
-                    "username": account.username,
-                    "domain": domain.get("domain"),
-                    "registered_at": domain.get("registered_at"),
-                    "nameservers": domain.get("nameservers", []),
-                })
-        return {"total": len(domains), "domains": domains}
+    @app.get("/api/domain-automation")
+    async def domain_automation_overview() -> Dict[str, Any]:
+        return domain_manager.overview()
 
-    @app.post("/api/domains/register")
-    async def register_domain(request: Dict[str, Any]) -> Dict[str, Any]:
-        """Register a new domain using DigitalPlat account credentials."""
-        from .services.domain_registrar import (
-            DomainRegistrar, DomainRegistrationConfig, register_domain_with_defaults
-        )
-        
-        username = request.get("username")
-        password = request.get("password")
-        domain_prefix = request.get("domain_prefix")
-        domain_suffix = request.get("domain_suffix", "dpdns.org")
-        nameservers = request.get("nameservers")
-        proxy = request.get("proxy")
-        
-        if not username or not domain_prefix:
-            raise HTTPException(
-                status_code=400, 
-                detail="username and domain_prefix are required"
-            )
-        
-        # Auto-lookup password from AccountStore if not provided
-        if not password:
-            accounts = account_store.get_accounts_by_status(AccountStatus.ACTIVE)
-            for account in accounts:
-                if account.username == username:
-                    password = account.password
-                    break
-            if not password:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Account '{username}' not found or has no saved password"
-                )
-        
-        # Run registration asynchronously - return task ID immediately
-        result = await register_domain_with_defaults(
-            username=username,
-            password=password,
-            domain_prefix=domain_prefix,
-            domain_suffix=domain_suffix,
-            nameservers=nameservers,
-            proxy=proxy,
-        )
-        
-        # If successful, store domain info in account metadata
-        if result.success:
-            accounts = account_store.get_accounts_by_status(AccountStatus.ACTIVE)
-            for account in accounts:
-                if account.username == username:
-                    if "domains" not in account.metadata:
-                        account.metadata["domains"] = []
-                    account.metadata["domains"].append({
-                        "domain": f"{domain_prefix}.{domain_suffix}",
-                        "registered_at": result.registered_at,
-                        "nameservers": result.nameservers,
-                    })
-                    await account_store.save()
-                    break
-        
-        return {
-            "success": result.success,
-            "domain": result.domain,
-            "message": result.message,
-            "steps": result.steps,
-            "error": result.error,
-        }
-
-    @app.post("/api/domains/check")
-    async def check_domain(request: Dict[str, Any]) -> Dict[str, Any]:
-        """Check domain availability without registering."""
-        from .services.domain_registrar import DomainRegistrar, DomainRegistrationConfig
-        
-        username = request.get("username")
-        password = request.get("password")
-        domain_prefix = request.get("domain_prefix")
-        domain_suffix = request.get("domain_suffix", "dpdns.org")
-        
-        if not username or not domain_prefix:
-            raise HTTPException(
-                status_code=400, 
-                detail="username and domain_prefix are required"
-            )
-        
-        # Auto-lookup password from AccountStore if not provided
-        if not password:
-            accounts = account_store.get_accounts_by_status(AccountStatus.ACTIVE)
-            for account in accounts:
-                if account.username == username:
-                    password = account.password
-                    break
-            if not password:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Account '{username}' not found or has no saved password"
-                )
-        
-        config = DomainRegistrationConfig(
-            username=username,
-            password=password,
-            domain_prefix=domain_prefix,
-            domain_suffix=domain_suffix,
-        )
-        
-        registrar = DomainRegistrar(config)
-        await registrar._init_browser(headless=True)
-        
+    @app.post("/api/domain-automation/tokens", status_code=status.HTTP_201_CREATED)
+    async def create_domain_token(request: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            login_result = await registrar.login()
-            if not login_result.success:
-                return {
-                    "available": False,
-                    "domain": f"{domain_prefix}.{domain_suffix}",
-                    "message": f"Login failed: {login_result.error}"
-                }
-            
-            check_result = await registrar.check_domain_availability()
-            return {
-                "available": check_result.available,
-                "domain": check_result.domain,
-                "message": check_result.message,
-            }
-        finally:
-            await registrar._close_browser()
+            token = domain_manager.validate_token(request.get("token"))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        name = str(request.get("name") or f"Token {len(domain_store.tokens) + 1}").strip()[:80]
+        if any(item.token == token for item in domain_store.tokens.values()):
+            raise HTTPException(status_code=409, detail="This API Token already exists")
+        record = APITokenRecord(name=name, token=token)
+        domain_store.tokens[record.id] = record
+        await domain_store.save()
+        return record.safe_dict()
+
+    @app.delete("/api/domain-automation/tokens/{token_id}")
+    async def delete_domain_token(token_id: str) -> Dict[str, Any]:
+        if not domain_store.tokens.pop(token_id, None):
+            raise HTTPException(status_code=404, detail="API Token not found")
+        await domain_store.save()
+        return {"deleted": token_id}
+
+    @app.post("/api/domain-automation/tokens/{token_id}/test")
+    async def test_domain_token(token_id: str) -> Dict[str, Any]:
+        try:
+            return await domain_manager.test_token(token_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="API Token not found") from error
+
+    @app.post("/api/domain-automation/subscriptions", status_code=status.HTTP_201_CREATED)
+    async def create_prefix_subscription(request: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            data = domain_manager.normalize_subscription(request)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        subscription = PrefixSubscription(**data)
+        domain_store.subscriptions[subscription.id] = subscription
+        await domain_store.save()
+        return subscription.to_dict()
+
+    @app.delete("/api/domain-automation/subscriptions/{subscription_id}")
+    async def delete_prefix_subscription(subscription_id: str) -> Dict[str, Any]:
+        if not domain_store.subscriptions.pop(subscription_id, None):
+            raise HTTPException(status_code=404, detail="Prefix subscription not found")
+        await domain_store.save()
+        return {"deleted": subscription_id}
+
+    @app.post("/api/domain-automation/jobs", status_code=status.HTTP_202_ACCEPTED)
+    async def start_domain_registration_job(request: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            job = await domain_manager.start_job(
+                subscription_id=str(request.get("subscription_id", "")),
+                target_count=request.get("target_count", 1),
+                token_ids=request.get("token_ids"),
+                max_attempts=request.get("max_attempts"),
+            )
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return job.to_dict()
+
+    @app.get("/api/domain-automation/jobs/{job_id}")
+    async def domain_registration_job_detail(job_id: str) -> Dict[str, Any]:
+        job = domain_store.jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Domain registration job not found")
+        return job.to_dict()
 
     return app
 
@@ -2124,6 +2071,130 @@ DASHBOARD_HTML = """<!doctype html>
     refresh();
     loadAccounts();
     setInterval(refresh, 3000);
+  </script>
+</body>
+</html>"""
+
+
+DOMAIN_AUTOMATION_HTML = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DigitalPlat 域名自动注册</title>
+  <style>
+    :root { --ink:#17211d;--muted:#68756f;--line:#dce5e0;--paper:#f3f7f5;--panel:#fff;--green:#087f5b;--green-soft:#e6f5ee;--red:#c2413a;--amber:#a16207;--blue:#2563eb; }
+    * { box-sizing:border-box; }
+    body { margin:0;background:linear-gradient(180deg,#edf4f0 0,#f8faf9 300px);color:var(--ink);font-family:"Avenir Next","PingFang SC","Noto Sans CJK SC",sans-serif; }
+    header { background:#14231d;color:#fff;padding:25px max(24px,calc((100vw - 1420px)/2));display:flex;align-items:center;justify-content:space-between;gap:24px; }
+    h1 { margin:0;font-size:25px;letter-spacing:-.02em; }
+    .subtitle { color:#afbeb7;font-size:13px;margin-top:5px; }
+    #connection { color:#b9c8c1;font-size:12px;display:flex;align-items:center;gap:8px; }
+    #connection::before { content:"";width:8px;height:8px;border-radius:50%;background:#42d39a;box-shadow:0 0 0 4px rgba(66,211,154,.13); }
+    main { max-width:1420px;margin:0 auto;padding:28px 24px 60px; }
+    .metrics { display:grid;grid-template-columns:repeat(5,1fr);border-bottom:1px solid var(--line);margin-bottom:28px; }
+    .metric { padding:4px 22px 19px;border-right:1px solid var(--line); }
+    .metric:first-child { padding-left:0; }.metric:last-child { border:0; }
+    .metric-label,.hint { color:var(--muted);font-size:12px;line-height:1.55; }
+    .metric-value { font-size:30px;font-weight:650;letter-spacing:-.04em;margin-top:7px;font-variant-numeric:tabular-nums; }
+    .layout { display:grid;grid-template-columns:minmax(300px,.8fr) minmax(460px,1.2fr);gap:20px;align-items:start; }
+    .stack { display:grid;gap:20px; }
+    .panel { background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 9px 30px rgba(24,49,38,.04); }
+    .panel-head { padding:17px 20px;border-bottom:1px solid var(--line);background:#fbfcfb;display:flex;align-items:center;justify-content:space-between;gap:16px; }
+    .panel-head h2 { margin:0;font-size:15px; }.panel-body { padding:20px; }
+    label { display:block;color:var(--muted);font-size:12px;margin:0 0 6px; }
+    input,select { width:100%;border:1px solid #cbd7d1;border-radius:7px;padding:10px 11px;font:inherit;color:var(--ink);background:#fff; }
+    input:focus,select:focus { outline:0;border-color:var(--green);box-shadow:0 0 0 3px rgba(8,127,91,.1); }
+    .form-grid { display:grid;grid-template-columns:1fr 1fr;gap:13px; }
+    .full { grid-column:1/-1; }.actions { display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:16px; }
+    button { border:0;border-radius:7px;padding:9px 15px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:.15s; }
+    button:hover { transform:translateY(-1px); }button:disabled { opacity:.5;cursor:not-allowed;transform:none; }
+    .primary { background:var(--green);color:#fff; }.secondary { background:#fff;color:var(--ink);border:1px solid var(--line); }.danger-link { background:transparent;color:var(--red);padding:4px 6px; }
+    .list { display:grid; }.list-row { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:13px 0;border-bottom:1px solid var(--line); }
+    .list-row:last-child { border:0;padding-bottom:0; }.list-row:first-child { padding-top:0; }
+    .row-title { font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }.row-meta { color:var(--muted);font-size:11px;margin-top:4px; }
+    .badge { display:inline-block;padding:4px 8px;border-radius:6px;font-size:10px;font-weight:700;letter-spacing:.02em; }
+    .badge-valid,.badge-completed,.badge-succeeded { color:var(--green);background:var(--green-soft); }.badge-invalid,.badge-failed { color:var(--red);background:#fbe9e7; }.badge-running,.badge-pending { color:var(--blue);background:#eaf0ff; }.badge-untested { color:var(--muted);background:#edf1ef; }
+    .token-line { display:flex;align-items:center;gap:8px;flex-wrap:wrap; }.token-mask { font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#415149; }
+    table { width:100%;border-collapse:collapse; }th,td { text-align:left;padding:11px 13px;border-bottom:1px solid var(--line);font-size:12px;vertical-align:top; }
+    th { color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.04em;background:#f7f9f8; }tbody tr:hover { background:#fbfcfb; }
+    .table-wrap { overflow:auto; }.task-id { font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#425049; }
+    .progress { height:7px;border-radius:99px;background:#e5ebe8;overflow:hidden;margin-top:6px; }.progress > span { display:block;height:100%;background:linear-gradient(90deg,#087f5b,#22a477);transition:width .25s; }
+    .job { border-top:1px solid var(--line); }.job:first-child { border-top:0; }.job summary { list-style:none;cursor:pointer;padding:16px 20px;display:grid;grid-template-columns:minmax(190px,1.3fr) 110px minmax(180px,1fr) 24px;align-items:center;gap:15px; }
+    .job summary::-webkit-details-marker,.attempt summary::-webkit-details-marker { display:none; }.chevron { color:var(--muted);transition:.18s; }.job[open]>.job-summary .chevron,.attempt[open]>.attempt-summary .chevron { transform:rotate(90deg); }
+    .job-body { padding:0 20px 18px;background:#fbfcfb;border-top:1px solid var(--line); }.attempt { border-bottom:1px solid var(--line); }.attempt:last-child { border:0; }
+    .attempt summary { list-style:none;cursor:pointer;display:grid;grid-template-columns:minmax(190px,1fr) 130px 100px 20px;gap:14px;align-items:center;padding:13px 0; }
+    .steps { display:grid;grid-template-columns:repeat(4,1fr);padding:2px 0 17px; }.step { position:relative;padding:29px 8px 0 0;min-width:0; }.step::before { content:"";position:absolute;left:8px;right:-8px;top:12px;height:2px;background:#dce5e0; }.step:last-child::before { right:calc(100% - 8px); }
+    .dot { position:absolute;left:0;top:4px;z-index:1;width:18px;height:18px;border-radius:50%;background:#fff;border:2px solid #c7d2cd;display:grid;place-items:center;color:#fff;font-size:10px; }.step.success::before { background:#62b896; }.step.success .dot { background:var(--green);border-color:var(--green); }.step.failed .dot { background:var(--red);border-color:var(--red); }.step.running .dot { border-color:var(--blue);box-shadow:0 0 0 4px rgba(37,99,235,.1);animation:pulse 1.3s infinite; }
+    .step-name { font-size:11px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }.step-message { font-size:10px;color:var(--muted);margin-top:4px;line-height:1.4;overflow-wrap:anywhere; }
+    .empty { text-align:center;color:var(--muted);padding:28px 12px;font-size:12px; }.notice { padding:12px 14px;border-radius:8px;background:#f5f8f6;color:#59675f;font-size:12px;line-height:1.6;margin-bottom:16px; }
+    .toast { position:fixed;right:20px;top:20px;z-index:20;padding:12px 16px;color:#fff;border-radius:8px;background:#14231d;box-shadow:0 10px 30px rgba(0,0,0,.18);font-size:13px; }
+    @keyframes pulse { 50% { opacity:.45; } }
+    @media(max-width:900px){.layout{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}.metric{border-bottom:1px solid var(--line)}.job summary{grid-template-columns:1fr auto}.job summary .job-progress{grid-column:1/-1}.attempt summary{grid-template-columns:1fr auto}.attempt summary .attempt-token{grid-column:1/-1}.steps{grid-template-columns:1fr}.step{padding:3px 0 17px 35px}.step::before{left:8px;right:auto;top:12px;bottom:-5px;width:2px;height:auto}.step:last-child::before{display:none}}
+    @media(max-width:600px){header{padding:21px 16px}main{padding:22px 14px 50px}.form-grid{grid-template-columns:1fr}.full{grid-column:auto}.metrics{grid-template-columns:1fr 1fr}.metric{padding:8px 12px 15px}.metric-value{font-size:25px}}
+  </style>
+</head>
+<body>
+  <header><div><h1>DigitalPlat 域名自动注册</h1><div class="subtitle">多 Token 调度 · 前缀订阅 · 注册结果回查</div></div><div id="connection">正在连接</div></header>
+  <main>
+    <section class="metrics">
+      <div class="metric"><div class="metric-label">API Token</div><div class="metric-value" id="stat-tokens">0</div></div>
+      <div class="metric"><div class="metric-label">可用 Token</div><div class="metric-value" id="stat-enabled">0</div></div>
+      <div class="metric"><div class="metric-label">前缀订阅</div><div class="metric-value" id="stat-subscriptions">0</div></div>
+      <div class="metric"><div class="metric-label">运行任务</div><div class="metric-value" id="stat-running">0</div></div>
+      <div class="metric"><div class="metric-label">注册成功</div><div class="metric-value" id="stat-domains" style="color:var(--green)">0</div></div>
+    </section>
+    <div class="layout">
+      <div class="stack">
+        <section class="panel"><div class="panel-head"><h2>API Token 池</h2><span class="hint">仅服务端保存</span></div><div class="panel-body">
+          <div class="form-grid"><div><label>Token 名称</label><input id="token-name" placeholder="例如：账号 A"></div><div><label>DigitalPlat API Token</label><input id="token-value" type="password" placeholder="dp_live_..."></div></div>
+          <div class="actions"><button class="primary" onclick="addToken()">添加 Token</button><span class="hint">页面不会回显 Token 原文</span></div><div id="token-list" class="list" style="margin-top:18px"></div>
+        </div></section>
+        <section class="panel"><div class="panel-head"><h2>前缀订阅</h2><span class="hint">自动生成候选域名</span></div><div class="panel-body">
+          <div class="form-grid">
+            <div><label>订阅名称</label><input id="sub-name" placeholder="例如：博客域名"></div>
+            <div><label>固定前缀</label><input id="sub-prefix" placeholder="例如：blog"></div>
+            <div><label>域名后缀</label><input id="sub-suffix" value="us.kg"></div>
+            <div><label>容量类型</label><select id="sub-slot"><option value="subscription">subscription</option><option value="paid">paid</option><option value="free">free</option></select></div>
+            <div><label>随机字符长度</label><input id="sub-length" type="number" min="2" max="24" value="6"></div>
+            <div><label>前缀分隔符</label><select id="sub-separator"><option value="-">连字符，例如 blog-a1b2c3</option><option value="">无分隔符，例如 bloga1b2c3</option></select></div>
+            <div class="full"><label>Nameservers（每行一个）</label><input id="sub-ns1" value="ns1.provider.com" style="margin-bottom:8px"><input id="sub-ns2" value="ns2.provider.com"></div>
+          </div>
+          <div class="actions"><button class="primary" onclick="addSubscription()">创建订阅</button></div><div id="subscription-list" class="list" style="margin-top:18px"></div>
+        </div></section>
+      </div>
+      <div class="stack">
+        <section class="panel"><div class="panel-head"><h2>启动注册任务</h2><span class="hint">Token 自动轮询</span></div><div class="panel-body">
+          <div class="notice">DigitalPlat 没有独立的域名可用性查询接口。系统会生成唯一候选名并直接注册；网络结果不明确时先回查该 Token 的域名列表，不会盲目重复提交同一个域名。</div>
+          <div class="form-grid"><div><label>前缀订阅</label><select id="job-subscription"><option value="">请先创建订阅</option></select></div><div><label>目标注册数量</label><input id="job-count" type="number" min="1" max="100" value="1"></div><div><label>最大尝试次数</label><input id="job-attempts" type="number" min="1" max="1000" value="10"></div><div><label>Token 范围</label><select id="job-token-mode"><option value="all">使用全部启用 Token</option></select></div></div>
+          <div class="actions"><button class="primary" id="start-job" onclick="startJob()">开始自动注册</button></div>
+        </div></section>
+        <section class="panel"><div class="panel-head"><h2>注册任务与详细进度</h2><span class="hint">每 3 秒刷新</span></div><div id="job-list"></div></section>
+        <section class="panel"><div class="panel-head"><h2>已注册域名</h2><span class="hint" id="domain-count">0 个</span></div><div class="table-wrap"><table><thead><tr><th>域名</th><th>Token</th><th>容量</th><th>状态</th><th>注册时间</th></tr></thead><tbody id="domain-table"></tbody></table></div></section>
+      </div>
+    </div>
+  </main>
+  <script>
+    let overview = {tokens:[],subscriptions:[],jobs:[],domains:[],stats:{}};
+    const esc = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+    const badge = status => `<span class="badge badge-${esc(status)}">${esc(({valid:'有效',invalid:'异常',untested:'未测试',running:'运行中',pending:'等待中',completed:'已完成',failed:'失败',succeeded:'成功'})[status] || status)}</span>`;
+    const time = value => value ? new Date(value).toLocaleString() : '-';
+    function toast(message, error=false){const el=document.createElement('div');el.className='toast';el.style.background=error?'var(--red)':'#14231d';el.textContent=message;document.body.appendChild(el);setTimeout(()=>el.remove(),3200)}
+    async function api(path, options={}){const response=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.detail||data.error||`HTTP ${response.status}`);return data}
+    async function refresh(){try{overview=await api('/api/domain-automation');render();document.getElementById('connection').textContent='已更新 '+new Date().toLocaleTimeString()}catch(error){document.getElementById('connection').textContent='服务连接失败'}}
+    function render(){const s=overview.stats||{};document.getElementById('stat-tokens').textContent=s.tokens||0;document.getElementById('stat-enabled').textContent=s.enabled_tokens||0;document.getElementById('stat-subscriptions').textContent=s.subscriptions||0;document.getElementById('stat-running').textContent=s.running_jobs||0;document.getElementById('stat-domains').textContent=s.registered_domains||0;renderTokens();renderSubscriptions();renderJobs();renderDomains()}
+    function renderTokens(){const root=document.getElementById('token-list');root.innerHTML=overview.tokens.length?overview.tokens.map(t=>`<div class="list-row"><div><div class="token-line"><span class="row-title">${esc(t.name)}</span>${badge(t.last_status)}</div><div class="row-meta"><span class="token-mask">${esc(t.token_masked)}</span> · ${t.domain_count==null?'域名数未知':t.domain_count+' 个域名'}${t.last_error?' · '+esc(t.last_error):''}</div></div><div><button class="secondary" onclick="testToken('${t.id}')">测试</button><button class="danger-link" onclick="deleteToken('${t.id}')">删除</button></div></div>`).join(''):'<div class="empty">尚未添加 API Token</div>'}
+    function renderSubscriptions(){const root=document.getElementById('subscription-list');root.innerHTML=overview.subscriptions.length?overview.subscriptions.map(s=>`<div class="list-row"><div><div class="row-title">${esc(s.name)}</div><div class="row-meta">${esc(s.prefix||'[随机]')}${esc(s.separator)}${'x'.repeat(Math.min(s.random_length,8))}.${esc(s.suffix)} · ${esc(s.slot_type)}<br>${s.nameservers.map(esc).join(' · ')}</div></div><button class="danger-link" onclick="deleteSubscription('${s.id}')">删除</button></div>`).join(''):'<div class="empty">尚未创建前缀订阅</div>';const select=document.getElementById('job-subscription');const current=select.value;select.innerHTML='<option value="">选择一个前缀订阅</option>'+overview.subscriptions.map(s=>`<option value="${s.id}">${esc(s.name)} — ${esc(s.prefix||'[随机]')}.${esc(s.suffix)}</option>`).join('');if(overview.subscriptions.some(s=>s.id===current))select.value=current}
+    function attemptSteps(attempt){const order=['candidate_generation','token_assignment','registration_request','registration_verification'];const byName=Object.fromEntries((attempt.steps||[]).map(s=>[s.name,s]));return `<div class="steps">${order.map(name=>{const step=byName[name]||{label:({'candidate_generation':'生成候选域名','token_assignment':'分配 API Token','registration_request':'提交注册请求','registration_verification':'确认注册结果'})[name],status:'pending',message:'等待执行'};const icon=step.status==='success'?'✓':step.status==='failed'?'!':'';return `<div class="step ${esc(step.status)}"><span class="dot">${icon}</span><div class="step-name">${esc(step.label)}</div><div class="step-message">${esc(step.message)}</div></div>`}).join('')}</div>`}
+    function renderJobs(){const root=document.getElementById('job-list');const openJobs=new Set([...document.querySelectorAll('.job[open]')].map(e=>e.dataset.id));const openAttempts=new Set([...document.querySelectorAll('.attempt[open]')].map(e=>e.dataset.id));if(!overview.jobs.length){root.innerHTML='<div class="empty">暂无注册任务</div>';return}root.innerHTML=overview.jobs.map((j,index)=>{const pct=Math.round((j.completed_attempts/Math.max(j.max_attempts,1))*100);const attempts=(j.attempts||[]).map((a,i)=>`<details class="attempt" data-id="${a.id}" ${openAttempts.has(a.id)||(!index&&!i)?'open':''}><summary class="attempt-summary"><div><div class="row-title">${esc(a.domain)}</div><div class="row-meta">${time(a.created_at)}</div></div><div class="attempt-token hint">${esc(a.token_name)}</div><div>${badge(a.status)}</div><div class="chevron">›</div></summary>${attemptSteps(a)}${a.error?`<div class="hint" style="color:var(--red);padding-bottom:14px">${esc(a.error)}</div>`:''}</details>`).join('');return `<details class="job" data-id="${j.id}" ${openJobs.has(j.id)||index===0?'open':''}><summary class="job-summary"><div><div class="row-title">任务 <span class="task-id">${esc(j.id)}</span></div><div class="row-meta">成功 ${j.successful_domains}/${j.target_count} · 失败尝试 ${j.failed_attempts}</div></div><div>${badge(j.status)}</div><div class="job-progress"><div class="hint">尝试 ${j.completed_attempts}/${j.max_attempts}</div><div class="progress"><span style="width:${pct}%"></span></div></div><div class="chevron">›</div></summary><div class="job-body">${j.error?`<div class="hint" style="color:var(--red);padding-top:13px">${esc(j.error)}</div>`:''}${attempts||'<div class="empty">等待生成候选域名</div>'}</div></details>`}).join('')}
+    function renderDomains(){document.getElementById('domain-count').textContent=overview.domains.length+' 个';document.getElementById('domain-table').innerHTML=overview.domains.length?overview.domains.map(d=>`<tr><td><strong>${esc(d.domain)}</strong><div class="hint">${(d.nameservers||[]).map(esc).join(' · ')}</div></td><td>${esc(d.token_name)}</td><td>${esc(d.slot_type)}</td><td>${badge(d.status||'ok')}</td><td>${time(d.registered_at)}</td></tr>`).join(''):'<tr><td colspan="5" class="empty">暂无成功注册的域名</td></tr>'}
+    async function addToken(){try{await api('/api/domain-automation/tokens',{method:'POST',body:JSON.stringify({name:document.getElementById('token-name').value,token:document.getElementById('token-value').value})});document.getElementById('token-value').value='';toast('Token 已添加');await refresh()}catch(e){toast(e.message,true)}}
+    async function testToken(id){try{toast('正在测试 Token');await api(`/api/domain-automation/tokens/${id}/test`,{method:'POST'});await refresh()}catch(e){toast(e.message,true)}}
+    async function deleteToken(id){if(!confirm('确认删除这个 API Token？'))return;try{await api(`/api/domain-automation/tokens/${id}`,{method:'DELETE'});await refresh()}catch(e){toast(e.message,true)}}
+    async function addSubscription(){try{await api('/api/domain-automation/subscriptions',{method:'POST',body:JSON.stringify({name:document.getElementById('sub-name').value,prefix:document.getElementById('sub-prefix').value,suffix:document.getElementById('sub-suffix').value,slot_type:document.getElementById('sub-slot').value,random_length:Number(document.getElementById('sub-length').value),separator:document.getElementById('sub-separator').value,nameservers:[document.getElementById('sub-ns1').value,document.getElementById('sub-ns2').value]})});toast('前缀订阅已创建');await refresh()}catch(e){toast(e.message,true)}}
+    async function deleteSubscription(id){if(!confirm('确认删除这个前缀订阅？'))return;try{await api(`/api/domain-automation/subscriptions/${id}`,{method:'DELETE'});await refresh()}catch(e){toast(e.message,true)}}
+    async function startJob(){const button=document.getElementById('start-job');button.disabled=true;try{const job=await api('/api/domain-automation/jobs',{method:'POST',body:JSON.stringify({subscription_id:document.getElementById('job-subscription').value,target_count:Number(document.getElementById('job-count').value),max_attempts:Number(document.getElementById('job-attempts').value)})});toast('任务已启动：'+job.id);await refresh()}catch(e){toast(e.message,true)}finally{button.disabled=false}}
+    refresh();setInterval(refresh,3000);
   </script>
 </body>
 </html>"""

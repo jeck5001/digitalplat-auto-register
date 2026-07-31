@@ -60,7 +60,7 @@ def test_batch_detail_exposes_all_account_registration_steps(tmp_path):
     )
 
 
-def test_dashboard_renders_recent_batches_and_account_timelines(tmp_path):
+def test_legacy_account_progress_renderer_is_kept_for_api_compatibility(tmp_path):
     store = AccountStore(tmp_path / "accounts.json")
     manager = web_app.RegistrationManager(store, tmp_path / "jobs.json")
 
@@ -68,9 +68,10 @@ def test_dashboard_renders_recent_batches_and_account_timelines(tmp_path):
         response = client.get("/")
 
     assert response.status_code == 200
-    assert "renderRecentBatches(data.batch_jobs || [])" in response.text
-    assert "function accountProgressRow" in response.text
-    assert "function stepTimeline" in response.text
+    assert "DigitalPlat 域名自动注册" in response.text
+    assert "前缀订阅" in response.text
+    assert "function accountProgressRow" in web_app.DASHBOARD_HTML
+    assert "function stepTimeline" in web_app.DASHBOARD_HTML
 
 
 def test_batch_counts_accounts_only_after_registration_finishes(tmp_path, monkeypatch):
