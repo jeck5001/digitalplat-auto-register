@@ -1023,12 +1023,12 @@ DASHBOARD_HTML = """<!doctype html>
       tbody.innerHTML = batches.map(b => 
         `<tr>
           <td>${b.id}</td>
-          <td>{b.total_accounts}</td>
-          <td>{b.completed_accounts}</td>
+          <td>${b.total_accounts}</td>
+          <td>${b.completed_accounts}</td>
           <td style="color:var(--green)">${b.successful_accounts}</td>
           <td style="color:var(--red)">${b.failed_accounts}</td>
           <td>${statusBadge(b.status)}</td>
-          <td>{b.created_at}</td>
+          <td>${b.created_at}</td>
           <td><button class="btn btn-secondary" style="padding:4px 8px;font-size:11px" onclick="viewBatch('${b.id}')">详情</button></td>
         </tr>`
       ).join('');
@@ -1063,7 +1063,7 @@ DASHBOARD_HTML = """<!doctype html>
           <td>${statusBadge(j.status)}</td>
           <td>${j.result ? (j.result.username || '-') : '-'}</td>
           <td>${j.result?.duration ? j.result.duration.toFixed(1) + 's' : '-'}</td>
-          <td>{j.created_at}</td>
+          <td>${j.created_at}</td>
         </tr>`
       ).join('');
     }
