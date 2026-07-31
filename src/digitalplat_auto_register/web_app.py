@@ -161,6 +161,8 @@ class RegistrationManager:
         username_prefix: Optional[str] = None,
         delay: float = 5.0,
         max_concurrent: int = 1,
+        turnstile_sitekey: Optional[str] = None,
+        turnstile_endpoint: Optional[str] = None,
     ) -> BatchRegistrationJob:
         """Start a batch registration job creating multiple accounts."""
         async with self._lock:
@@ -188,6 +190,11 @@ class RegistrationManager:
                 max_concurrent=min(max_concurrent, MAX_CONCURRENT_REGISTRATIONS ),
             )
             self._account_store.create_batch_job(batch_job)
+
+            # Store turnstile config in batch job for use during registration
+            if turnstile_sitekey or turnstile_endpoint:
+                batch_job.metadata['turnstile_sitekey'] = turnstile_sitekey
+                batch_job.metadata['turnstile_endpoint'] = turnstile_endpoint
 
             # Start batch processing
             self._batch_task = asyncio.create_task(self._run_batch(batch_job.id))
@@ -297,12 +304,18 @@ class RegistrationManager:
                     asyncio.create_task(self._account_store.save())
 
                 try:
+                    # Get turnstile config from batch job metadata
+                    ts_sitekey = batch_job.metadata.get('turnstile_sitekey')
+                    ts_endpoint = batch_job.metadata.get('turnstile_endpoint')
+                    
                     result = await register_with_defaults(
                         username=account.username,
                         password=account.password,
                         referral_code=batch_job.referral_code or DEFAULT_REFERRAL_CODE,
                         phone=_generate_phone_number(),
                         on_step_complete=on_step_complete,
+                        turnstile_sitekey=ts_sitekey,
+                        turnstile_endpoint=ts_endpoint,
                     )
                     
                     if result.success:
@@ -468,7 +481,9 @@ def create_app(
             "referral_code": "abc123",
             "username_prefix": "myuser",
             "delay": 5.0,
-            "max_concurrent": 1
+            "max_concurrent": 1,
+            "turnstile_sitekey": "optional sitekey override",
+            "turnstile_endpoint": "optional endpoint override"
         }
         """
         count = request.get("count", 1)
@@ -481,6 +496,8 @@ def create_app(
             username_prefix=request.get("username_prefix"),
             delay=request.get("delay", 5.0),
             max_concurrent=request.get("max_concurrent", 1),
+            turnstile_sitekey=request.get("turnstile_sitekey"),
+            turnstile_endpoint=request.get("turnstile_endpoint"),
         )
         
         return {
@@ -775,9 +792,17 @@ DASHBOARD_HTML = """<!doctype html>
   <title>DigitalPlat 控制台</title>
   <style>
     :root {
-      --ink:#17201e; --muted:#69726e; --line:#d7ddd8; --paper:#f6f7f3;
-      --panel:#ffffff; --green:#13795b; --red:#b63b32; --amber:#a56918;
-      --teal:#016d79; --blue:#1a56db;
+      --ink:#1a2332; --muted:#64748b; --line:#e2e8f0; --paper:#f8fafc;
+      --panel:#ffffff; --green:#059669; --red:#dc2626; --amber:#d97706;
+      --teal:#0891b2; --blue:#2563eb; --purple:#7c3aed;
+    }
+    @keyframes slideIn {
+      from { transform: translateX(100%); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
     }
     * { box-sizing:border-box; }
     body { margin:0; color:var(--ink); background:var(--paper); font-family:"Avenir Next","PingFang SC","Noto Sans CJK SC",sans-serif; }
@@ -785,9 +810,10 @@ DASHBOARD_HTML = """<!doctype html>
     header { display:flex; align-items:flex-end; justify-content:space-between; gap:24px; border-bottom:2px solid var(--ink); padding-bottom:18px; flex-wrap:wrap; }
     h1 { margin:0; font-size:28px; font-weight:650; }
     .subtitle { color:var(--muted); font-size:14px; }
-    nav { display:flex; gap:8px; margin-top:24px; border-bottom:1px solid var(--line); }
-    nav button { border:none; background:none; padding:12px 20px; font:inherit; cursor:pointer; color:var(--muted); border-bottom:3px solid transparent; }
-    nav button.active { color:var(--ink); border-bottom-color:var(--green); font-weight:600; }
+    nav { display:flex; gap:4px;margin-top:24px;border-bottom:2px solid var(--line); }
+    nav button { border:none; background:none; padding:12px 20px; font:inherit; cursor:pointer; color:var(--muted);border-bottom:3px solid transparent;transition:all 0.2s; }
+    nav button:hover { color:var(--ink);background:var(--paper); }
+    nav button.active { color:var(--green); border-bottom-color:var(--green); font-weight:600; }
     .tab-content { display:none; padding-top:24px; }
     .tab-content.active { display:block; }
     .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:1px; background:var(--line); border:1px solid var(--line); margin:24px 0; }
@@ -802,29 +828,31 @@ DASHBOARD_HTML = """<!doctype html>
     label { display:block; color:var(--muted); font-size:13px; margin-bottom:6px; }
     input, select, textarea { width:100%; border:1px solid #abb5af; background:#fff; border-radius:4px; padding:10px 12px; color:var(--ink); font:inherit; margin-bottom:12px; }
     input:focus, select:focus, textarea:focus { outline:none; border-color:var(--green); }
-    button.btn { border:0; border-radius:4px; padding:10px 16px; background:var(--green); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
-    button.btn:disabled { background:#a7b0ab; cursor:not-allowed; }
+    button.btn { border:0; border-radius:6px; padding:10px 20px; background:var(--green); color:#fff; font:inherit; font-weight:600; cursor:pointer; transition:all 0.2s; box-shadow:0 1px 3px rgba(0,0,0,0.1); }
+    button.btn:hover { transform:translateY(-1px); box-shadow:0 4px 12px rgba(5,150,105,0.3); }
+    button.btn:disabled { background:#94a3b8; cursor:not-allowed; transform:none; box-shadow:none; }
     button.btn-secondary { background:var(--panel); color:var(--ink); border:1px solid var(--line); }
-    button.btn-danger { background:var(--red); }
+    button.btn-secondary:hover { border-color:var(--green); color:var(--green); background:#f0fdf4; }
     .hint { font-size:12px; color:var(--muted); line-height:1.6; }
     table { width:100%; border-collapse:collapse; }
     th, td { padding:10px 12px; text-align:left; border-bottom:1px solid var(--line); font-size:13px; }
     th { background:var(--paper); font-weight:600; color:var(--muted); }
     tr:hover { background:var(--paper); }
     .badge { padding:3px 8px; border-radius:999px; font-size:11px; font-weight:600; white-space:nowrap; }
-    .badge-running { background:#e0f1f1; color:var(--teal); }
+    .badge-running { background:#e0f1f1; color:var(--teal); animation:pulse 1.5s infinite; }
     .badge-succeeded, .badge-active { background:#def3e8; color:var(--green); }
     .badge-failed { background:#f8e2df; color:var(--red); }
     .badge-pending { background:#fef3c7; color:var(--amber); }
-    .badge-registering { background:#dbeafe; color:var(--blue); }
+    .badge-registering { background:#dbeafe; color:var(--blue); animation:pulse 1.5s infinite; }
     .toolbar { display:flex; gap:10px; margin-bottom:16px; align-items:center; flex-wrap:wrap; }
     .search-box { flex:1; min-width:200px; }
     .progress-bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin-top:8px; }
     .progress-fill { height:100%; background:var(--green); transition:width 0.3s; }
     .steps { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
-    .step { border:1px solid var(--line); padding:3px 6px; color:var(--muted); font-size:11px; border-radius:3px; }
-    .step.ok { border-color:#8dc8ad; color:var(--green); }
-    .step.no { border-color:#df9991; color:var(--red); }
+    .step { border:1px solid var(--line); padding:4px 8px; color:var(--muted); font-size:11px; border-radius:4px; display:flex; align-items:center; gap:4px; }
+    .step.ok { border-color:#8dc8ad; color:var(--green); background:#f0fdf4; }
+    .step.no { border-color:#df9991; color:var(--red); background:#fef2f2; }
+    .step.current { border-color:var(--blue); color:var(--blue); background:#eff6ff; animation:pulse 1s infinite; }
     .account-actions { display:flex; gap:6px; }
     .account-actions button { padding:4px 8px; font-size:11px; }
     .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:100; align-items:center; justify-content:center; }
@@ -902,20 +930,35 @@ DASHBOARD_HTML = """<!doctype html>
               <label>用户名前缀（可选）</label>
               <input type="text" id="batch-prefix" placeholder="留空则自动生成">
             </div>
-            <div>
-              <label>注册间隔（秒）</label>
-              <input type="number" id="batch-delay" value="5" min="0" max="60">
+              <div>
+                <label>注册间隔（秒）</label>
+                <input type="number" id="batch-delay" value="5" min="0" max="60">
+              </div>
+              <div>
+                <label>并发数</label>
+                <select id="batch-concurrent">
+                  <option value="1">1 (推荐)</option>
+                  <option value="2">2</option>
+                  <option value="3">3</option>
+                </select>
+              </div>
             </div>
-            <div>
-              <label>并发数</label>
-              <select id="batch-concurrent">
-                <option value="1">1 (推荐)</option>
-                <option value="2">2</option>
-                <option value="3">3</option>
-              </select>
-            </div>
-          </div>
-          <button class="btn" id="start-batch-btn" onclick="startBatch()">开始批量注册</button>
+            
+            <details style="margin:16px 0">
+              <summary style="cursor:pointer;color:var(--muted);font-size:13px">🔧 Turnstile 配置（可选）</summary>
+              <div class="grid-2" style="margin-top:12px">
+                <div>
+                  <label>Site Key</label>
+                  <input type="text" id="batch-turnstile-sitekey" placeholder="留空则使用环境变量">
+                </div>
+                <div>
+                  <label>Solver Endpoint</label>
+                  <input type="text" id="batch-turnstile-endpoint" placeholder="留空则使用环境变量">
+                </div>
+              </div>
+            </details>
+            
+            <button class="btn" id="start-batch-btn" onclick="startBatch()">开始批量注册</button>
           <p class="hint">批量创建账号，系统自动生成用户名和密码。注册间隔可避免被风控拦截。</p>
         </div>
       </div>
@@ -1140,6 +1183,27 @@ DASHBOARD_HTML = """<!doctype html>
       ).join('');
     }
     
+    // Toast notification system
+    function showToast(message, type = 'success') {
+      const toast = document.createElement('div');
+      toast.style.cssText = `
+        position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:8px;
+        color:#fff;font-size:14px;z-index:9999;animation:slideIn 0.3s ease;
+        box-shadow:0 4px 12px rgba(0,0,0,0.15);
+        background:${type === 'success' ? '#13795b' : type === 'error' ? '#b63b32' : '#016d79'};
+      `;
+      toast.textContent = message;
+      document.body.appendChild(toast);
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transition = 'opacity 0.3s';
+        setTimeout(() => toast.remove(), 300);
+      }, 3000);
+    }
+    
+    // Track if user manually closed a modal
+    let userClosedModal = false;
+    
     // Batch registration
     async function startBatch() {
       const btn = document.getElementById('start-batch-btn');
@@ -1152,6 +1216,8 @@ DASHBOARD_HTML = """<!doctype html>
         username_prefix: document.getElementById('batch-prefix').value || undefined,
         delay: parseFloat(document.getElementById('batch-delay').value),
         max_concurrent: parseInt(document.getElementById('batch-concurrent').value),
+        turnstile_sitekey: document.getElementById('batch-turnstile-sitekey')?.value || undefined,
+        turnstile_endpoint: document.getElementById('batch-turnstile-endpoint')?.value || undefined,
       };
       
       try {
@@ -1162,10 +1228,10 @@ DASHBOARD_HTML = """<!doctype html>
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || '创建失败');
-        alert('批量任务已创建: ' + data.batch_job_id);
+        showToast('✓ 批量任务已创建: ' + data.batch_job_id);
         refresh();
       } catch (error) {
-        alert('错误: ' + error.message);
+        showToast('✗ 错误: ' + error.message, 'error');
       } finally {
         btn.disabled = false;
         btn.textContent = '开始批量注册';
@@ -1182,10 +1248,11 @@ DASHBOARD_HTML = """<!doctype html>
     };
 
     async function viewBatch(batchId) {
+      userClosedModal = false; // Reset flag when opening modal
       const response = await fetch('/api/batch/' + batchId);
       const data = await response.json();
       if (!response.ok) {
-        alert('加载失败: ' + (data.detail || '未知错误'));
+        showToast('加载失败: ' + (data.detail || '未知错误'), 'error');
         return;
       }
       
@@ -1224,9 +1291,11 @@ DASHBOARD_HTML = """<!doctype html>
       `;
       document.getElementById('account-detail-modal').classList.add('active');
       
-      // Auto-refresh if batch is still running
-      if (data.status === 'running' || data.status === 'pending') {
-        setTimeout(() => viewBatch(batchId), 3000);
+      // Auto-refresh if batch is still running (only if user hasn't closed)
+      if (!userClosedModal && (data.status === 'running' || data.status === 'pending')) {
+        setTimeout(() => {
+          if (!userClosedModal) viewBatch(batchId);
+        }, 3000);
       }
     }
     
@@ -1280,10 +1349,11 @@ DASHBOARD_HTML = """<!doctype html>
     }
     
     async function viewAccount(accountId) {
+      userClosedModal = false; // Reset flag when opening modal
       const response = await fetch('/api/accounts/' + accountId);
       const data = await response.json();
       if (!response.ok) {
-        alert('加载失败: ' + (data.detail || '未知错误'));
+        showToast('加载失败: ' + (data.detail || '未知错误'), 'error');
         return;
       }
       // Format the detail view with password highlighted for active accounts
@@ -1301,34 +1371,48 @@ DASHBOARD_HTML = """<!doctype html>
       try {
         const progressResp = await fetch('/api/accounts/' + accountId + '/progress');
         const progress = await progressResp.json();
-        if (progress.steps && progress.steps.length > 0) {
-          html += '<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line)">';
-          html += '<strong>注册进度:</strong>';
-          html += '<div class="steps" style="margin-top:8px">';
-          const stepLabels = {
-            'turnstile_token_acquisition': '🔑 Turnstile验证',
-            'email_creation': '📧 创建邮箱',
-            'browser_navigation': '🌐 浏览器导航',
-            'form_submission': '📝 提交表单',
-            'verification_email_retrieval': '📬 获取验证邮件',
-            'verification_completion': '✅ 完成验证'
-          };
-          for (const step of progress.steps) {
-            const label = stepLabels[step.name] || step.name;
+        const stepLabels = {
+          'turnstile_token_acquisition': '🔑 Turnstile验证',
+          'email_creation': '📧 创建邮箱',
+          'browser_navigation': '🌐 浏览器导航',
+          'form_submission': '📝 提交表单',
+          'verification_email_retrieval': '📬 获取验证邮件',
+          'verification_completion': '✅ 完成验证'
+        };
+        const stepOrder = ['turnstile_token_acquisition', 'email_creation', 'browser_navigation', 'form_submission', 'verification_email_retrieval', 'verification_completion'];
+        
+        // Show full progress bar with all steps (even pending ones)
+        html += '<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line)">';
+        html += '<strong>注册进度:</strong>';
+        html += '<div class="steps" style="margin-top:8px">';
+        
+        let currentStepFound = false;
+        for (const stepName of stepOrder) {
+          const step = progress.steps?.find(s => s.name === stepName);
+          const label = stepLabels[stepName] || stepName;
+          
+          if (step) {
             const cls = step.success === true ? 'ok' : (step.success === false ? 'no' : '');
             const status = step.success === true ? '✓' : (step.success === false ? '✗' : '⏳');
             html += `<span class="step ${cls}" title="${step.message || ''}">${status} ${label}${step.duration ? ' (' + step.duration.toFixed(1) + 's)' : ''}</span>`;
+          } else if (!currentStepFound && (progress.current_step === stepName || progress.status === 'registering' || progress.status === 'pending')) {
+            // Show current step as pulsing
+            html += `<span class="step current" title="进行中...">⏳ ${label}</span>`;
+            currentStepFound = true;
+          } else {
+            // Show future steps as pending
+            html += `<span class="step" title="等待中">○ ${label}</span>`;
           }
-          html += '</div>';
-          if (progress.current_step) {
-            const currentLabel = stepLabels[progress.current_step] || progress.current_step;
-            html += `<p class="hint" style="margin-top:8px">当前步骤: ${currentLabel}</p>`;
-          }
-          if (progress.error) {
-            html += `<p style="color:var(--red);margin-top:8px"><strong>错误:</strong> ${progress.error}</p>`;
-          }
-          html += '</div>';
         }
+        html += '</div>';
+        if (progress.current_step) {
+          const currentLabel = stepLabels[progress.current_step] || progress.current_step;
+          html += `<p class="hint" style="margin-top:8px">⏱ 当前: ${currentLabel}</p>`;
+        }
+        if (progress.error) {
+          html += `<p style="color:var(--red);margin-top:8px"><strong>错误:</strong> ${progress.error}</p>`;
+        }
+        html += '</div>';
       } catch (e) {
         // Ignore progress fetch errors
       }
@@ -1336,9 +1420,11 @@ DASHBOARD_HTML = """<!doctype html>
       document.getElementById('account-detail-content').innerHTML = html;
       document.getElementById('account-detail-modal').classList.add('active');
       
-      // Auto-refresh progress if account is still registering
-      if (data.status === 'registering' || data.status === 'pending') {
-        setTimeout(() => viewAccount(accountId), 2000);
+      // Auto-refresh progress if account is still registering (only if user hasn't closed)
+      if (!userClosedModal && (data.status === 'registering' || data.status === 'pending')) {
+        setTimeout(() => {
+          if (!userClosedModal) viewAccount(accountId);
+        }, 2000);
       }
     }
     
@@ -1433,6 +1519,9 @@ DASHBOARD_HTML = """<!doctype html>
     
     function closeModal(id) {
       document.getElementById(id).classList.remove('active');
+      if (id === 'account-detail-modal') {
+        userClosedModal = true;
+      }
     }
     
     // Search debounce

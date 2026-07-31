@@ -140,6 +140,9 @@ class BatchRegistrationJob:
     # Error tracking
     error: Optional[str] = None
     
+    # Additional metadata (e.g., turnstile config)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
     
