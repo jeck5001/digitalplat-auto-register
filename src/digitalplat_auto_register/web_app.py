@@ -587,12 +587,28 @@ def create_app(
 ) -> FastAPI:
     """Create FastAPI application with all routes."""
 
+    fallback_data_dir: Optional[Path] = None
+
+    def database_path(explicit: Optional[str], env_name: str, filename: str) -> str:
+        nonlocal fallback_data_dir
+        if explicit:
+            return explicit
+        configured = os.getenv(env_name)
+        if configured:
+            return configured
+        production_dir = Path("/app/data")
+        if production_dir.is_dir() and os.access(production_dir, os.W_OK):
+            return str(production_dir / filename)
+        if fallback_data_dir is None:
+            fallback_data_dir = Path(tempfile.mkdtemp(prefix="digitalplat-web-"))
+        return str(fallback_data_dir / filename)
+
     # Initialize new feature components
     pool = AccountPool(
-        db_path=pool_db_path or os.getenv("ACCOUNT_POOL_PATH", "/app/data/account_pool.db")
+        db_path=database_path(pool_db_path, "ACCOUNT_POOL_PATH", "account_pool.db")
     )
     stats = StatisticsCollector(
-        db_path=stats_db_path or os.getenv("STATISTICS_PATH", "/app/data/statistics.db")
+        db_path=database_path(stats_db_path, "STATISTICS_PATH", "statistics.db")
     )
     
     if account_store is None:

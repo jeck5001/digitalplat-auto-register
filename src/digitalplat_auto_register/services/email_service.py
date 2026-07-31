@@ -227,9 +227,17 @@ class MailTDService(EmailService):
         logger.info(f"Waiting for verification email at {email}")
         start_time = time.time()
         
-        # Ensure we're looking at the right inbox
-        if self.current_email != email:
-            await self._navigate_to_email_inbox(email)
+        # Ensure we're looking at the right inbox. Navigation failures used to
+        # be swallowed, leaving ``self.page`` as None and causing every retry
+        # to fail with ``NoneType.get_by_role``.
+        if self.current_email != email or not await self._page_is_usable():
+            ready = await self._navigate_to_email_inbox(email)
+            if not ready:
+                return VerificationEmailResult(
+                    found=False,
+                    duration=time.time() - start_time,
+                    error="Temporary mailbox page is unavailable",
+                )
         
         try:
             end_time = time.time() + timeout
@@ -240,13 +248,24 @@ class MailTDService(EmailService):
                 logger.debug(f"Checking for verification email (attempt {check_count})")
                 
                 try:
+                    if not await self._page_is_usable():
+                        if not await self._navigate_to_email_inbox(email):
+                            return VerificationEmailResult(
+                                found=False,
+                                duration=time.time() - start_time,
+                                error="Temporary mailbox page was closed or became unavailable",
+                            )
+
                     if check_count > 1:
                         # Refresh within the authenticated mailbox session so newly
                         # delivered messages are loaded without changing mailboxes.
                         refresh_button = self.page.get_by_role(
                             "button", name="Refresh", exact=True
                         )
-                        await refresh_button.click()
+                        if await refresh_button.count():
+                            await refresh_button.first.click()
+                        else:
+                            await self.page.reload(wait_until="domcontentloaded")
                         await self.page.wait_for_timeout(1000)
 
                     # Look for DigitalPlat verification email
@@ -332,8 +351,15 @@ class MailTDService(EmailService):
             
             while time.time() < end_time:
                 try:
+                    if not await self._page_is_usable():
+                        if not await self._navigate_to_email_inbox(email):
+                            return VerificationEmailResult(
+                                found=False,
+                                duration=time.time() - start_time,
+                                error="Temporary mailbox page was closed or became unavailable",
+                            )
                     # Refresh inbox
-                    await self.page.reload(wait_until="networkidle")
+                    await self.page.reload(wait_until="domcontentloaded")
                     await asyncio.sleep(2)
                     
                     # Check all emails for sender match
@@ -403,16 +429,30 @@ class MailTDService(EmailService):
             self.context = await self.browser.new_context(viewport={'width': 1280, 'height': 720})
             self.page = await self.context.new_page()
     
-    async def _navigate_to_email_inbox(self, email: str):
+    async def _page_is_usable(self) -> bool:
+        if not self.page:
+            return False
+        try:
+            return not self.page.is_closed()
+        except Exception:
+            return False
+
+    async def _navigate_to_email_inbox(self, email: str) -> bool:
         """Navigate to specific email inbox"""
         try:
+            if not await self._page_is_usable():
+                await self._init_browser()
+            if not self.page:
+                return False
             encoded_email = quote(email, safe='')
             inbox_url = f"{self.base_url}/{encoded_email}"
-            await self.page.goto(inbox_url, wait_until="networkidle")
+            await self.page.goto(inbox_url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(2)
-            
+            self.current_email = email
+            return True
         except Exception as e:
             logger.debug(f"Error navigating to email inbox: {str(e)}")
+            return False
     
     async def _find_digitalplat_email(self):
         """Find DigitalPlat verification email in inbox"""
