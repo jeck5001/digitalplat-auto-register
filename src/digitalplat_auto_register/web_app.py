@@ -21,6 +21,12 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Response, status
 from fastapi.responses import HTMLResponse
 
+# Import new feature modules
+from .core.account_pool import AccountPool, SelectionStrategy, AccountStatus as PoolAccountStatus
+from .core.statistics import StatisticsCollector, MetricType
+from .utils.enhanced_logging import setup_enhanced_logging, get_logger, log_aggregator, perf_tracker
+from .web_routes import create_api_router
+
 logger = logging.getLogger(__name__)
 
 from .core.account import (
@@ -574,11 +580,26 @@ def create_app(
     account_store: Optional[AccountStore] = None,
     domain_store: Optional[DomainAutomationStore] = None,
     domain_manager: Optional[DomainAutomationManager] = None,
+    # New feature components (account pool, statistics, enhanced logging)
+    pool_db_path: Optional[str] = None,
+    stats_db_path: Optional[str] = None,
+    enable_v2_api: bool = True,
 ) -> FastAPI:
     """Create FastAPI application with all routes."""
+
+    # Initialize new feature components
+    pool = AccountPool(
+        db_path=pool_db_path or os.getenv("ACCOUNT_POOL_PATH", "/app/data/account_pool.db")
+    )
+    stats = StatisticsCollector(
+        db_path=stats_db_path or os.getenv("STATISTICS_PATH", "/app/data/statistics.db")
+    )
     
     if account_store is None:
         account_store = AccountStore()
+    # Wire up pool and stats for automatic sync
+    account_store.set_pool(pool)
+    account_store.set_stats(stats)
     if manager is None:
         manager = RegistrationManager(account_store)
     if domain_store is None:
@@ -599,6 +620,9 @@ def create_app(
         app.state.account_store = account_store
         app.state.domain_automation_store = domain_store
         app.state.domain_automation_manager = domain_manager
+        # Store pool and stats for access in routes
+        app.state.account_pool = pool
+        app.state.statistics = stats
         await domain_manager.start_renewal_scheduler()
         try:
             yield
@@ -624,6 +648,30 @@ def create_app(
     @app.get("/domain-automation", response_class=HTMLResponse)
     async def domain_automation_dashboard() -> str:
         return DOMAIN_AUTOMATION_HTML
+    
+    # ==================== V2 API (Account Pool, Statistics, Logs) ====================
+    
+    if enable_v2_api:
+        # Include the new API router for account pool, statistics, and logs
+        v2_router = create_api_router(pool, stats)
+        app.include_router(v2_router, prefix="/api/v2")
+        
+        # Migration endpoint
+        @app.post("/api/v2/migrate")
+        async def trigger_migration():
+            """Trigger migration from legacy JSON to new SQLite pool"""
+            try:
+                from .core.bridge import AccountPoolBridge
+                bridge = AccountPoolBridge(account_store, pool_db_path, stats_db_path)
+                result = bridge.migrate_from_store()
+                return {"status": "completed", **result}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        # V2 Dashboard page
+        @app.get("/pool-dashboard", response_class=HTMLResponse)
+        async def pool_dashboard() -> str:
+            return POOL_DASHBOARD_HTML
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:
@@ -1249,6 +1297,204 @@ def create_app(
         return job.to_dict()
 
     return app
+
+
+# ==================== HTML Templates ====================
+
+POOL_DASHBOARD_HTML = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>账户池管理 - DigitalPlat</title>
+  <style>
+    :root { --bg:#0f172a; --panel:#1e293b; --ink:#f1f5f9; --muted:#94a3b8; 
+            --green:#10b981; --red:#ef4444; --blue:#3b82f6; --amber:#f59e0b; }
+    body { font-family: system-ui, sans-serif; margin:0; background:var(--bg); color:var(--ink); }
+    .header { padding: 16px 24px; background:var(--panel); border-bottom: 1px solid #334155; }
+    .header h1 { margin:0; font-size: 20px; }
+    .nav { display:flex; gap:16px; padding:12px 24px; background:var(--panel); border-bottom:1px solid #334155; }
+    .nav a { color:var(--muted); text-decoration:none; padding:6px 12px; border-radius:6px; }
+    .nav a:hover, .nav a.active { color:var(--ink); background:#334155; }
+    .container { max-width:1200px; margin:24px auto; padding:0 24px; }
+    .stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px; margin-bottom:24px; }
+    .stat-card { background:var(--panel); padding:20px; border-radius:12px; border:1px solid #334155; }
+    .stat-value { font-size:32px; font-weight:700; margin:8px 0; }
+    .stat-label { color:var(--muted); font-size:14px; }
+    .green { color:var(--green); }
+    .red { color:var(--red); }
+    .blue { color:var(--blue); }
+    table { width:100%; border-collapse:collapse; margin-top:16px; }
+    th, td { padding:12px; text-align:left; border-bottom:1px solid #334155; }
+    th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; }
+    .btn { padding:8px 16px; border:none; border-radius:6px; cursor:pointer; font-size:14px; font-weight:500; }
+    .btn-primary { background:var(--blue); color:#fff; }
+    .btn-danger { background:var(--red); color:#fff; }
+    .status-badge { padding:4px 10px; border-radius:12px; font-size:12px; font-weight:500; }
+    .status-active { background:rgba(16,185,129,0.2); color:var(--green); }
+    .status-suspended { background:rgba(239,68,68,0.2); color:var(--red); }
+    .tabs { display:flex; gap:8px; margin-bottom:16px; }
+    .tab { padding:8px 16px; border-radius:6px; cursor:pointer; background:var(--panel); border:1px solid #334155; }
+    .tab.active { background:var(--blue); border-color:var(--blue); }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🔐 DigitalPlat 账户池管理</h1>
+  </div>
+  <div class="nav">
+    <a href="/">注册控制台</a>
+    <a href="/domain-automation">域名自动化</a>
+    <a href="/pool-dashboard" class="active">账户池</a>
+  </div>
+  <div class="container">
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">总账户数</div>
+        <div class="stat-value blue" id="total-accounts">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">可用账户</div>
+        <div class="stat-value green" id="available-accounts">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">健康度</div>
+        <div class="stat-value" id="pool-health">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">今日注册</div>
+        <div class="stat-value" id="today-registrations">-</div>
+      </div>
+    </div>
+    
+    <div class="tabs">
+      <div class="tab active" onclick="showTab('accounts')">账户列表</div>
+      <div class="tab" onclick="showTab('stats')">统计面板</div>
+      <div class="tab" onclick="showTab('logs')">日志查看</div>
+      <div class="tab" onclick="showTab('health')">健康检查</div>
+    </div>
+    
+    <div id="accounts-panel">
+      <button class="btn btn-primary" onclick="migrate()">🔄 从旧系统迁移数据</button>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>用户名</th><th>邮箱</th><th>状态</th><th>使用次数</th><th>成功率</th><th>操作</th></tr>
+        </thead>
+        <tbody id="accounts-table"></tbody>
+      </table>
+    </div>
+    
+    <div id="stats-panel" style="display:none">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">总注册</div>
+          <div class="stat-value" id="stat-total">-</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">成功率</div>
+          <div class="stat-value green" id="stat-rate">-</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">域名注册</div>
+          <div class="stat-value blue" id="stat-domains">-</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">平均耗时</div>
+          <div class="stat-value" id="stat-avgtime">-</div>
+        </div>
+      </div>
+    </div>
+    
+    <div id="logs-panel" style="display:none">
+      <table>
+        <thead>
+          <tr><th>时间</th><th>级别</th><th>消息</th><th>上下文</th></tr>
+        </thead>
+        <tbody id="logs-table"></tbody>
+      </table>
+    </div>
+    
+    <div id="health-panel" style="display:none">
+      <table>
+        <thead>
+          <tr><th>账户ID</th><th>健康</th><th>问题</th><th>成功率</th></tr>
+        </thead>
+        <tbody id="health-table"></tbody>
+      </table>
+    </div>
+  </div>
+  
+  <script>
+    async function loadStats() {
+      const r = await fetch('/api/v2/pool');
+      const d = await r.json();
+      document.getElementById('total-accounts').textContent = d.total_accounts || 0;
+      document.getElementById('available-accounts').textContent = d.available_accounts || 0;
+      document.getElementById('pool-health').textContent = (d.pool_health * 100).toFixed(0) + '%';
+      document.getElementById('pool-health').className = 'stat-value ' + (d.pool_health > 0.7 ? 'green' : d.pool_health > 0.3 ? '' : 'red');
+    }
+    
+    async function loadAccounts() {
+      const r = await fetch('/api/v2/pool/accounts');
+      const d = await r.json();
+      const tbody = document.getElementById('accounts-table');
+      tbody.innerHTML = d.map(a => '<tr><td>' + a.id.slice(0,12) + '...</td><td>' + a.username + '</td><td>' + a.email + '</td><td><span class="status-badge status-' + a.status + '">' + a.status + '</span></td><td>' + a.total_uses + '</td><td>' + (a.success_rate * 100).toFixed(0) + '%</td><td><button class="btn btn-danger" onclick="deleteAccount(\\'' + a.id + '\\')">删除</button></td></tr>').join('');
+    }
+    
+    async function loadDashboardStats() {
+      const r = await fetch('/api/v2/stats');
+      const d = await r.json();
+      document.getElementById('stat-total').textContent = d.total_registrations;
+      document.getElementById('stat-rate').textContent = (d.registration_success_rate * 100).toFixed(0) + '%';
+      document.getElementById('stat-domains').textContent = d.total_domains_registered;
+      document.getElementById('stat-avgtime').textContent = d.avg_registration_duration.toFixed(1) + 's';
+    }
+    
+    async function loadLogs() {
+      const r = await fetch('/api/v2/logs?limit=50');
+      const d = await r.json();
+      const tbody = document.getElementById('logs-table');
+      tbody.innerHTML = d.map(l => '<tr><td>' + l.timestamp.slice(11,19) + '</td><td>' + l.level + '</td><td>' + l.message.slice(0,50) + '</td><td>' + JSON.stringify(l.context || {}).slice(0,30) + '</td></tr>').join('');
+    }
+    
+    async function loadHealth() {
+      const r = await fetch('/api/v2/pool/health');
+      const d = await r.json();
+      const tbody = document.getElementById('health-table');
+      tbody.innerHTML = Object.entries(d).map(([id,h]) => '<tr><td>' + id.slice(0,12) + '...</td><td>' + (h.healthy ? '✅' : '❌')</td><td>' + (h.issues.join(', ') || '无') + '</td><td>' + (h.success_rate * 100).toFixed(0) + '%</td></tr>').join('');
+    }
+    
+    async function migrate() {
+      if (!confirm('确定要从旧系统迁移数据吗？')) return;
+      const r = await fetch('/api/v2/migrate', {method:'POST'});
+      const d = await r.json();
+      alert('迁移完成: ' + JSON.stringify(d));
+      loadStats(); loadAccounts();
+    }
+    
+    async function deleteAccount(id) {
+      if (!confirm('确定要删除该账户吗？')) return;
+      await fetch('/api/v2/pool/accounts/' + id, {method:'DELETE'});
+      loadAccounts();
+    }
+    
+    function showTab(name) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      event.target.classList.add('active');
+      document.getElementById('accounts-panel').style.display = name === 'accounts' ? '' : 'none';
+      document.getElementById('stats-panel').style.display = name === 'stats' ? '' : 'none';
+      document.getElementById('logs-panel').style.display = name === 'logs' ? '' : 'none';
+      document.getElementById('health-panel').style.display = name === 'health' ? '' : 'none';
+      if (name === 'stats') loadDashboardStats();
+      if (name === 'logs') loadLogs();
+      if (name === 'health') loadHealth();
+    }
+    
+    loadStats(); loadAccounts();
+    setInterval(loadStats, 30000);
+  </script>
+</body>
+</html>"""
 
 
 app = create_app()
