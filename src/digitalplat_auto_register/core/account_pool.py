@@ -293,6 +293,97 @@ class AccountPool:
         
         logger.info(f"Bulk added {len(entries)} accounts to pool")
         return entries
+
+    def sync_account(
+        self,
+        profile: UserProfile,
+        account_id: str,
+        status: AccountStatus = AccountStatus.ACTIVE,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> AccountEntry:
+        """Create or update a legacy JSON account using its stable ID."""
+        payload = dict(metadata or {})
+        payload["legacy_sync"] = True
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                existing = conn.execute(
+                    "SELECT metrics, tags, notes, domain_registered, metadata FROM accounts WHERE id = ?",
+                    (account_id,),
+                ).fetchone()
+                metrics = existing[0] if existing else json.dumps(asdict(AccountMetrics()))
+                tags = existing[1] if existing else json.dumps(["legacy_sync"])
+                notes = existing[2] if existing else ""
+                domains = existing[3] if existing else json.dumps([])
+                if existing and existing[4]:
+                    previous_metadata = json.loads(existing[4])
+                    previous_metadata.update(payload)
+                    payload = previous_metadata
+                conn.execute(
+                    """
+                    INSERT INTO accounts
+                        (id, profile, status, metrics, tags, notes, domain_registered, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        profile = excluded.profile,
+                        status = excluded.status,
+                        metadata = excluded.metadata,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        account_id,
+                        json.dumps({
+                            "username": profile.username,
+                            "email": profile.email,
+                            "fullname": profile.fullname,
+                            "phone": profile.phone,
+                            "password": profile.password,
+                            "address_line1": profile.address_line1,
+                            "address_line2": profile.address_line2,
+                            "city": profile.city,
+                            "state": profile.state,
+                            "postal_code": profile.postal_code,
+                            "country": profile.country,
+                            "referral_code": profile.referral_code,
+                        }),
+                        status.value,
+                        metrics,
+                        tags,
+                        notes,
+                        domains,
+                        json.dumps(payload),
+                    ),
+                )
+                conn.commit()
+        except sqlite3.Error as error:
+            logger.error(f"Failed to sync account {account_id}: {error}")
+            raise
+
+        entry = self.get_account(account_id)
+        if entry is None:
+            raise RuntimeError(f"Account sync did not persist account {account_id}")
+        return entry
+
+    def delete_legacy_accounts_except(self, account_ids: List[str]) -> int:
+        """Remove stale rows created by the legacy JSON bridge."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                rows = conn.execute(
+                    "SELECT id, tags FROM accounts"
+                ).fetchall()
+                stale_ids = [
+                    row[0]
+                    for row in rows
+                    if "legacy_sync" in json.loads(row[1] or "[]")
+                    and row[0] not in account_ids
+                ]
+                for account_id in stale_ids:
+                    conn.execute("DELETE FROM account_events WHERE account_id = ?", (account_id,))
+                    conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+                conn.commit()
+            return len(stale_ids)
+        except (sqlite3.Error, ValueError) as error:
+            logger.warning(f"Failed to remove stale legacy accounts: {error}")
+            return 0
     
     def get_account(self, account_id: str) -> Optional[AccountEntry]:
         """

@@ -167,6 +167,8 @@ class AccountStore:
     def set_pool(self, pool) -> None:
         """Set AccountPool reference for syncing"""
         self._pool = pool
+        if self._loaded:
+            self._sync_all_to_pool()
     
     def set_stats(self, stats) -> None:
         """Set StatisticsCollector reference for recording"""
@@ -221,6 +223,7 @@ class AccountStore:
                 logger.error(f"Failed to load data: {e}")
         
         self._loaded = True
+        self._sync_all_to_pool()
     
     def _persist(self) -> None:
         """Save data to disk atomically."""
@@ -260,15 +263,7 @@ class AccountStore:
     def create_account(self, account: Account) -> Account:
         """Add a new account to the store."""
         self._accounts[account.id] = account
-        # Sync to pool if available (fire-and-forget)
-        if self.pool:
-            try:
-                from .account_pool import AccountPool
-                if isinstance(self.pool, AccountPool):
-                    profile = self._account_to_profile(account)
-                    self.pool.add_account(profile, tags=["legacy_sync"])
-            except Exception:
-                pass  # Don't fail creation if pool sync fails
+        self._sync_to_pool(account)
         return account
     
     def _account_to_profile(self, account: 'Account'):
@@ -282,6 +277,45 @@ class AccountStore:
             phone=account.phone or "",
             referral_code=account.referral_code or "",
         )
+
+    @staticmethod
+    def _pool_status(account: Account):
+        from .account_pool import AccountStatus as PoolAccountStatus
+
+        return {
+            AccountStatus.ACTIVE: PoolAccountStatus.ACTIVE,
+            AccountStatus.PENDING: PoolAccountStatus.IN_USE,
+            AccountStatus.REGISTERING: PoolAccountStatus.IN_USE,
+            AccountStatus.FAILED: PoolAccountStatus.SUSPENDED,
+            AccountStatus.EXPIRED: PoolAccountStatus.SUSPENDED,
+        }[account.status]
+
+    def _sync_to_pool(self, account: Account) -> None:
+        pool = self.pool
+        if not pool:
+            return
+        try:
+            profile = self._account_to_profile(account)
+            metadata = dict(account.metadata)
+            metadata["legacy_status"] = account.status.value
+            if hasattr(pool, "sync_account"):
+                pool.sync_account(
+                    profile,
+                    account_id=account.id,
+                    status=self._pool_status(account),
+                    metadata=metadata,
+                )
+            else:
+                pool.add_account(profile, account_id=account.id, tags=["legacy_sync"], metadata=metadata)
+        except Exception as error:
+            logger.warning(f"Failed to sync account {account.id} to account pool: {error}")
+
+    def _sync_all_to_pool(self) -> None:
+        pool = self.pool
+        if pool and hasattr(pool, "delete_legacy_accounts_except"):
+            pool.delete_legacy_accounts_except(list(self._accounts))
+        for account in self._accounts.values():
+            self._sync_to_pool(account)
     
     def get_account(self, account_id: str) -> Optional[Account]:
         """Get account by ID."""
@@ -303,15 +337,23 @@ class AccountStore:
         
         for key, value in kwargs.items():
             if hasattr(account, key):
+                if key == "status" and isinstance(value, str):
+                    value = AccountStatus(value)
                 setattr(account, key, value)
-        
+
         account.updated_at = datetime.now().astimezone().isoformat()
+        self._sync_to_pool(account)
         return account
     
     def delete_account(self, account_id: str) -> bool:
         """Delete an account by ID."""
         if account_id in self._accounts:
             del self._accounts[account_id]
+            if self.pool:
+                try:
+                    self.pool.delete_account(account_id)
+                except Exception as error:
+                    logger.warning(f"Failed to delete account {account_id} from account pool: {error}")
             return True
         return False
     
