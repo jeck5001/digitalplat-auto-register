@@ -222,10 +222,15 @@ class RegistrationManager:
         try:
             delay = float(delay)
             delay_max = float(delay if delay_max is None else delay_max)
+            max_concurrent = int(max_concurrent)
         except (TypeError, ValueError) as error:
-            raise ValueError("Registration delay must be a number") from error
+            raise ValueError("Registration delay and concurrency must be numeric") from error
         if delay < 0 or delay_max < delay or delay_max > 3600:
             raise ValueError("Registration delay must satisfy 0 <= minimum <= maximum <= 3600")
+        if not 1 <= max_concurrent <= MAX_CONCURRENT_REGISTRATIONS:
+            raise ValueError(
+                f"Registration concurrency must be between 1 and {MAX_CONCURRENT_REGISTRATIONS}"
+            )
         async with self._lock:
             # Create account entries for each registration
             account_ids = []
@@ -250,7 +255,7 @@ class RegistrationManager:
                 delay_between_registrations=delay,
                 delay_min_seconds=delay,
                 delay_max_seconds=delay_max,
-                max_concurrent=min(max_concurrent, MAX_CONCURRENT_REGISTRATIONS ),
+                max_concurrent=max_concurrent,
             )
             self._account_store.create_batch_job(batch_job)
 
@@ -366,9 +371,26 @@ class RegistrationManager:
         await self._account_store.save()
 
         semaphore = asyncio.Semaphore(batch_job.max_concurrent)
+        start_lock = asyncio.Lock()
+        last_started = 0.0
+
+        async def wait_for_start_slot() -> None:
+            """Space registration starts while still allowing in-flight overlap."""
+            nonlocal last_started
+            async with start_lock:
+                if last_started:
+                    delay = random.uniform(
+                        batch_job.delay_min_seconds,
+                        batch_job.delay_max_seconds,
+                    )
+                    remaining = delay - (time.monotonic() - last_started)
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                last_started = time.monotonic()
 
         async def register_one(account_id: str) -> None:
             async with semaphore:
+                await wait_for_start_slot()
                 account = self._account_store.get_account(account_id)
                 if not account or account.status != AccountStatus.PENDING:
                     return
@@ -467,26 +489,11 @@ class RegistrationManager:
                 await self._account_store.save()
 
         try:
-            if batch_job.delay_max_seconds > 0:
-                # Safety mode: the cooldown starts after the previous account
-                # has fully finished, so requests cannot overlap accidentally.
-                for index, account_id in enumerate(batch_job.account_ids):
-                    await register_one(account_id)
-                    if index < len(batch_job.account_ids) - 1:
-                        delay = random.uniform(
-                            batch_job.delay_min_seconds,
-                            batch_job.delay_max_seconds,
-                        )
-                        if delay > 0:
-                            await asyncio.sleep(delay)
-            else:
-                # Explicit zero-delay mode retains the legacy concurrency
-                # option for controlled local testing.
-                tasks = [
-                    asyncio.create_task(register_one(account_id))
-                    for account_id in batch_job.account_ids
-                ]
-                await asyncio.gather(*tasks, return_exceptions=True)
+            tasks = [
+                asyncio.create_task(register_one(account_id))
+                for account_id in batch_job.account_ids
+            ]
+            await asyncio.gather(*tasks)
             
             batch_job.status = "completed"
             batch_job.error = None

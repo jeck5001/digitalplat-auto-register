@@ -38,11 +38,7 @@ class TurnstileSolver:
         """
         self.config = config
         self.session = requests.Session()
-        
-        # Configure session
-        if config.timeout:
-            self.session.timeout = config.timeout
-            
+
         logger.debug(f"Initialized Turnstile solver: {config.solver_type}")
     
     async def get_token(
@@ -169,7 +165,8 @@ class TurnstileSolver:
             response = self.session.post(
                 create_url,
                 json={"task": task_payload},
-                headers={"Content-Type": "application/json"}
+                headers={"Content-Type": "application/json"},
+                timeout=self.config.timeout,
             )
             
             if response.status_code != 200:
@@ -219,7 +216,8 @@ class TurnstileSolver:
                 response = self.session.post(
                     poll_url,
                     json={"taskId": task_id},
-                    headers={"Content-Type": "application/json", "Accept": "application/json"}
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                    timeout=self.config.timeout,
                 )
                 
                 if response.status_code != 200:
