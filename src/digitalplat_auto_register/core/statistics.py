@@ -247,8 +247,8 @@ class StatisticsCollector:
                 conn.execute(
                     """
                     INSERT INTO registrations 
-                    (username, email, domain, success, duration, error_reason, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (username, email, domain, success, duration, error_reason, timestamp, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         username,
@@ -258,6 +258,7 @@ class StatisticsCollector:
                         duration,
                         error_reason,
                         datetime.now().isoformat(),
+                        json.dumps(metadata or {}),
                     ),
                 )
                 conn.commit()

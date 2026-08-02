@@ -149,3 +149,47 @@ def test_batch_counts_accounts_only_after_registration_finishes(tmp_path, monkey
         progress = manager.account_progress(store.get_account(account_id))
         assert progress["completed_steps"] == 6
         assert progress["current_step"] is None
+
+
+def test_batch_honors_concurrency_with_positive_start_delay(tmp_path, monkeypatch):
+    active = 0
+    maximum_active = 0
+    two_started = asyncio.Event()
+
+    async def fake_register(**kwargs):
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        if active == 2:
+            two_started.set()
+        try:
+            await asyncio.wait_for(two_started.wait(), timeout=0.5)
+            return RegistrationResult(
+                success=True,
+                username=kwargs["username"],
+                email="registered@example.test",
+                password=kwargs["password"],
+                registration_status=RegistrationStatus.COMPLETED,
+            )
+        finally:
+            active -= 1
+
+    async def run_batch():
+        store = AccountStore(tmp_path / "accounts.json")
+        await store.load()
+        manager = web_app.RegistrationManager(store, tmp_path / "jobs.json")
+        batch = await manager.start_batch(
+            count=3,
+            delay=0.01,
+            delay_max=0.01,
+            max_concurrent=2,
+        )
+        await manager._batch_task
+        return batch
+
+    monkeypatch.setattr(web_app, "register_with_defaults", fake_register)
+    batch = asyncio.run(run_batch())
+
+    assert maximum_active == 2
+    assert batch.status == "completed"
+    assert batch.successful_accounts == 3
