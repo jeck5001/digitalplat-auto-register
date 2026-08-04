@@ -65,7 +65,13 @@ include = ["digitalplat_auto_register", "digitalplat_auto_register.*"]
 version = { attr = "digitalplat_auto_register.__version__" }
 
 [tool.setuptools.package-data]
-digitalplat_auto_register = ["py.typed", "*.yaml", "*.yml", "*.toml"]
+digitalplat_auto_register = [
+    "py.typed",
+    "*.yaml", "*.yml", "*.toml",
+    "templates/*.html",
+    "static/css/*.css",
+    "static/js/*.js",
+]
 
 [tool.black]
 line-length = 88
