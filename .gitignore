@@ -10,3 +10,4 @@ __pycache__/
 data/
 *.log
 config.local.yaml
+.omo/

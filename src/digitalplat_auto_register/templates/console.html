@@ -1,0 +1,358 @@
+{% extends "base.html" %}
+
+{% block title %}DigitalPlat 控制台{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">DigitalPlat 控制台</h1>
+    <div class="page-sub">批量注册与账号管理</div>
+  </div>
+  <div class="page-meta">
+    <div id="updated" class="conn">
+      <span class="conn-dot"></span>
+      <span>正在连接…</span>
+    </div>
+  </div>
+</div>
+
+<div class="tabs">
+  <button class="tab active" data-tab="dashboard" onclick="showTab('dashboard', this)">概览</button>
+  <button class="tab" data-tab="batch" onclick="showTab('batch', this)">批量注册</button>
+  <button class="tab" data-tab="accounts" onclick="showTab('accounts', this)">账号管理</button>
+  <button class="tab" data-tab="domains" onclick="showTab('domains', this)">账号域名注册</button>
+  <button class="tab" data-tab="history" onclick="showTab('history', this)">任务记录</button>
+</div>
+
+<!-- ======== Dashboard Tab ======== -->
+<div id="tab-dashboard" class="tab-content active">
+  <div class="metrics">
+    <div class="metric">
+      <div class="metric-label">总账号数</div>
+      <div id="stat-total" class="metric-value">0</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">活跃</div>
+      <div id="stat-active" class="metric-value ok">0</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">注册中</div>
+      <div id="stat-registering" class="metric-value info">0</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">待注册</div>
+      <div id="stat-pending" class="metric-value warn">0</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">失败</div>
+      <div id="stat-failed" class="metric-value err">0</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">运行中批量任务</div>
+      <div id="stat-batch" class="metric-value">0</div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">最近注册</div>
+          <div class="card-hint">最新 5 个账号</div>
+        </div>
+      </div>
+      <div class="card-body flush">
+        <div class="table-wrap">
+          <table id="recent-accounts-table">
+            <thead><tr><th>用户名</th><th>邮箱</th><th>状态</th></tr></thead>
+            <tbody><tr><td colspan="3" class="hint">加载中…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">最近批量任务</div>
+          <div class="card-hint">最新 5 个</div>
+        </div>
+      </div>
+      <div class="card-body flush">
+        <div class="table-wrap">
+          <table id="recent-batches-table">
+            <thead><tr><th>任务 ID</th><th>总数</th><th>结果</th><th>状态</th></tr></thead>
+            <tbody><tr><td colspan="4" class="hint">加载中…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======== Batch Tab ======== -->
+<div id="tab-batch" class="tab-content">
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <div class="card-title">新建批量注册任务</div>
+        <div class="card-hint">自动生成用户名和密码，按节奏执行</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="form-row form-row-3">
+        <div>
+          <label>注册数量</label>
+          <input type="number" id="batch-count" value="5" min="1" max="100">
+        </div>
+        <div>
+          <label>邀请码</label>
+          <input type="text" id="batch-referral" value="4qn8iw8r1o">
+        </div>
+        <div>
+          <label>用户名前缀（可选）</label>
+          <input type="text" id="batch-prefix" placeholder="留空则自动生成">
+        </div>
+        <div>
+          <label>最小间隔（秒）</label>
+          <input type="number" id="batch-delay" value="15" min="0" max="3600">
+        </div>
+        <div>
+          <label>最大间隔（秒）</label>
+          <input type="number" id="batch-delay-max" value="30" min="0" max="3600">
+          <div class="hint">每个账号开始前随机等待，避免风控</div>
+        </div>
+        <div>
+          <label>并发数</label>
+          <select id="batch-concurrent">
+            <option value="1">1（推荐）</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+          </select>
+          <div class="hint">有间隔时按账号完成后串行</div>
+        </div>
+      </div>
+
+      <details style="margin: var(--s-4) 0; border:1px solid var(--line-1); border-radius: var(--r-2); padding: var(--s-4);">
+        <summary style="cursor:pointer; color: var(--ink-2); font-size: 12px; font-weight: 500;">Turnstile 配置（可选）</summary>
+        <div class="form-row" style="margin-top: var(--s-4); margin-bottom: 0;">
+          <div>
+            <label>Site Key</label>
+            <input type="text" id="batch-turnstile-sitekey" placeholder="留空则使用环境变量">
+          </div>
+          <div>
+            <label>Solver Endpoint</label>
+            <input type="text" id="batch-turnstile-endpoint" placeholder="留空则使用环境变量">
+          </div>
+        </div>
+      </details>
+
+      <div style="display:flex; gap: var(--s-3); align-items: center; margin-top: var(--s-5);">
+        <button class="btn btn-primary" id="start-batch-btn" onclick="startBatch()">开始批量注册</button>
+        <span class="hint">批量创建账号，间隔与并发可控制节奏</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="active-batch-section" class="card" style="display:none;">
+    <div class="card-head">
+      <div class="card-title">当前批量任务</div>
+    </div>
+    <div class="card-body" id="active-batch-info"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-title">历史批量任务</div>
+    </div>
+    <div class="card-body flush">
+      <div class="table-wrap">
+        <table id="batch-history-table">
+          <thead>
+            <tr><th>任务 ID</th><th>总数</th><th>进度</th><th>成功</th><th>失败</th><th>状态</th><th>创建时间</th><th></th></tr>
+          </thead>
+          <tbody><tr><td colspan="8" class="hint">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======== Accounts Tab ======== -->
+<div id="tab-accounts" class="tab-content">
+  <div class="toolbar">
+    <input type="text" class="search-box" id="account-search" placeholder="搜索用户名、邮箱或姓名…">
+    <select id="account-filter" onchange="loadAccounts()">
+      <option value="">全部状态</option>
+      <option value="active">活跃</option>
+      <option value="pending">待注册</option>
+      <option value="registering">注册中</option>
+      <option value="failed">失败</option>
+    </select>
+    <div class="toolbar-end">
+      <button class="btn btn-secondary" onclick="showAddAccountModal()">+ 添加账号</button>
+      <button class="btn btn-ghost" onclick="exportAccounts()">导出</button>
+      <button class="btn btn-danger" onclick="bulkDelete()">删除选中</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body flush">
+      <div class="table-wrap">
+        <table id="accounts-table">
+          <thead>
+            <tr>
+              <th style="width:32px"><input type="checkbox" id="select-all" onchange="toggleSelectAll()"></th>
+              <th>ID</th>
+              <th>用户名</th>
+              <th>邮箱</th>
+              <th>状态</th>
+              <th>注册时间</th>
+              <th style="width: 200px"></th>
+            </tr>
+          </thead>
+          <tbody><tr><td colspan="7" class="hint">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======== History Tab ======== -->
+<div id="tab-history" class="tab-content">
+  <div class="card">
+    <div class="card-head">
+      <div class="card-title">单次注册任务记录</div>
+    </div>
+    <div class="card-body flush">
+      <div class="table-wrap">
+        <table id="history-table">
+          <thead>
+            <tr><th>任务 ID</th><th>账号 ID</th><th>状态</th><th>结果</th><th>耗时</th><th>创建时间</th></tr>
+          </thead>
+          <tbody><tr><td colspan="6" class="hint">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======== Domains Tab ======== -->
+<div id="tab-domains" class="tab-content">
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <div class="card-title">通过已注册账号申请域名</div>
+        <div class="card-hint">使用账号登录 DigitalPlat 申请免费域名</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="notice">
+        支持 <strong>.dpdns.org</strong> / .us.kg / .xx.kg / .qzz.io / .qd.je 等免费后缀。每个账号限注册 1 个免费域名。
+      </div>
+
+      <div class="form-row">
+        <div>
+          <label>选择账号 *</label>
+          <select id="domain-account">
+            <option value="">— 选择已注册的账号 —</option>
+          </select>
+        </div>
+        <div>
+          <label>域名后缀</label>
+          <select id="domain-suffix">
+            <option value="dpdns.org">.dpdns.org（推荐）</option>
+            <option value="us.kg">.us.kg（$3 一次性）</option>
+            <option value="xx.kg">.xx.kg（$3 一次性）</option>
+            <option value="qzz.io">.qzz.io</option>
+            <option value="qd.je">.qd.je</option>
+          </select>
+        </div>
+        <div>
+          <label>域名前缀 *</label>
+          <input type="text" id="domain-prefix" placeholder="例如：mysite">
+        </div>
+        <div>
+          <label>Nameserver 1</label>
+          <input type="text" id="domain-ns1" value="ns1.cloudflare.com">
+        </div>
+        <div class="full">
+          <label>Nameserver 2</label>
+          <input type="text" id="domain-ns2" value="ns2.cloudflare.com">
+        </div>
+      </div>
+
+      <div style="display:flex; gap: var(--s-3); margin-top: var(--s-2);">
+        <button class="btn btn-secondary" id="check-domain-btn" onclick="checkDomain()">检查可用性</button>
+        <button class="btn btn-primary" id="register-domain-btn" onclick="registerDomain()">注册域名</button>
+      </div>
+      <div id="domain-result" style="margin-top: var(--s-4);"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-title">已注册域名</div>
+    </div>
+    <div class="card-body flush">
+      <div class="table-wrap">
+        <table id="domains-table">
+          <thead><tr><th>域名</th><th>账号</th><th>注册时间</th><th>Nameservers</th></tr></thead>
+          <tbody><tr><td colspan="4" class="hint">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======== Modal: Add Account ======== -->
+<div class="modal-overlay" id="add-account-modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 class="modal-title">手动添加账号</h3>
+      <div class="modal-sub">仅录入管理，不立刻发起注册</div>
+    </div>
+    <div class="modal-body">
+      <div class="form-row" style="grid-template-columns: 1fr; gap: var(--s-3);">
+        <div>
+          <label>用户名 *</label>
+          <input type="text" id="new-username">
+        </div>
+        <div>
+          <label>邮箱 *</label>
+          <input type="email" id="new-email">
+        </div>
+        <div>
+          <label>密码（可选）</label>
+          <input type="text" id="new-password">
+        </div>
+        <div>
+          <label>邀请码</label>
+          <input type="text" id="new-referral" value="4qn8iw8r1o">
+        </div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal('add-account-modal')">取消</button>
+      <button class="btn btn-primary" onclick="createAccount()">创建</button>
+    </div>
+  </div>
+</div>
+
+<!-- ======== Modal: Account / Batch Detail ======== -->
+<div class="modal-overlay" id="account-detail-modal">
+  <div class="modal modal-wide">
+    <div class="modal-head">
+      <h3 class="modal-title" id="detail-modal-title">账号详情</h3>
+    </div>
+    <div class="modal-body" id="account-detail-content"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal('account-detail-modal')">关闭</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/console.js"></script>
+{% endblock %}
