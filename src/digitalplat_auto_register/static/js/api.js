@@ -19,7 +19,7 @@
 
   /* Thin wrapper around fetch with JSON handling + error unwrapping */
   async function api(path, options) {
-    const opts = options || {};
+    let opts = options || {};
     const headers = Object.assign({}, opts.headers || {});
     if (opts.body && typeof opts.body !== "string" && !(opts.body instanceof FormData)) {
       opts = Object.assign({}, opts, { body: JSON.stringify(opts.body) });

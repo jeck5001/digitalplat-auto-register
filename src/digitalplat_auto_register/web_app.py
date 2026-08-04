@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -50,6 +51,23 @@ DEFAULT_ACCOUNTS_PATH = "/app/data/accounts.json"
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(_PACKAGE_DIR / "templates"))
+
+
+def asset_version() -> str:
+    """Digest of static file mtimes; appended to asset URLs to defeat browser caching."""
+    digest = hashlib.md5()
+    try:
+        for path in sorted((_PACKAGE_DIR / "static").rglob("*")):
+            if path.is_file():
+                info = path.stat()
+                digest.update(f"{path.name}:{info.st_mtime_ns}:{info.st_size}".encode())
+    except OSError:
+        return "0"
+    return digest.hexdigest()[:10]
+
+
+TEMPLATES.env.globals["asset_version"] = asset_version
+
 MAX_JOB_HISTORY = 50
 MAX_CONCURRENT_REGISTRATIONS = 3
 RUNNING_INTERRUPTED_MESSAGE = "Registration stopped because the service restarted."
