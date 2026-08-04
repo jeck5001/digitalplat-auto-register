@@ -74,13 +74,14 @@ def test_original_console_and_new_domain_module_have_separate_routes(tmp_path):
     assert "账号管理" in original_console.text
     assert "账号域名注册" in original_console.text
     assert 'href="/domain-automation"' in original_console.text
-    assert "function accountProgressRow" in original_console.text
-    assert "function stepTimeline" in original_console.text
+    assert "/static/js/console.js" in original_console.text
+    assert "/static/css/app.css" in original_console.text
 
     assert domain_console.status_code == 200
     assert "DigitalPlat 域名自动注册" in domain_console.text
     assert "前缀订阅" in domain_console.text
     assert 'href="/"' in domain_console.text
+    assert "/static/js/domain_automation.js" in domain_console.text
 
 
 def test_original_account_domain_routes_are_kept(tmp_path):

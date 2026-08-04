@@ -1,0 +1,300 @@
+{% extends "base.html" %}
+
+{% block title %}DigitalPlat 域名自动注册{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">DigitalPlat 域名自动注册</h1>
+    <div class="page-sub">多 Token 调度 · 前缀订阅 · Cloudflare 自动托管 · 注册结果回查</div>
+  </div>
+  <div class="page-meta">
+    <div id="connection" class="conn">
+      <span class="conn-dot"></span>
+      <span>正在连接…</span>
+    </div>
+  </div>
+</div>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="metric-label">API Token</div>
+    <div class="metric-value" id="stat-tokens">0</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">可用 Token</div>
+    <div class="metric-value ok" id="stat-enabled">0</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">前缀订阅</div>
+    <div class="metric-value" id="stat-subscriptions">0</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">运行任务</div>
+    <div class="metric-value info" id="stat-running">0</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">注册成功</div>
+    <div class="metric-value ok" id="stat-domains">0</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">Cloudflare Active</div>
+    <div class="metric-value info" id="stat-cloudflare">0</div>
+  </div>
+</div>
+
+<div class="layout-2col">
+
+  <!-- Left column -->
+  <div class="stack">
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">API Token 池</div>
+          <div class="card-hint">仅服务端保存</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="form-row">
+          <div>
+            <label>Token 名称</label>
+            <input id="token-name" placeholder="例如：账号 A">
+          </div>
+          <div>
+            <label>DigitalPlat API Token</label>
+            <input id="token-value" type="password" placeholder="dp_live_...">
+          </div>
+        </div>
+        <div class="actions" style="display:flex; gap: var(--s-3); align-items:center; margin-top: var(--s-4);">
+          <button class="btn btn-primary" onclick="addToken()">添加 Token</button>
+          <span class="hint">页面不会回显 Token 原文</span>
+        </div>
+        <div id="token-list" class="list" style="margin-top: var(--s-4)"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">Cloudflare 托管</div>
+          <div class="card-hint">Zone 与 NS 自动配置</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="notice">
+          API Token 建议只授予 <strong>Zone / Zone / Edit</strong> 权限，并限制到目标账户。系统创建 Zone 后读取专属 NS，再通过对应的 DigitalPlat Token 更新委派。
+        </div>
+        <div class="form-row">
+          <div>
+            <label>Cloudflare Account ID</label>
+            <input id="cf-account-id" placeholder="32 位 Account ID">
+          </div>
+          <div>
+            <label>Cloudflare API Token</label>
+            <input id="cf-token" type="password" placeholder="仅保存于服务端">
+          </div>
+        </div>
+        <div class="actions" style="display:flex; gap: var(--s-3); margin-top: var(--s-4);">
+          <button class="btn btn-primary" onclick="saveCloudflare()">保存配置</button>
+          <button class="btn btn-secondary" onclick="testCloudflare()">测试</button>
+          <button class="btn btn-danger" onclick="deleteCloudflare()">删除</button>
+        </div>
+        <div id="cloudflare-state" class="hint" style="margin-top: var(--s-4)">尚未配置</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">自动续期</div>
+          <div class="card-hint">多 Token 定时检查</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="notice warn">
+          复用自动续期仓库的规则：读取每个 Token 的域名，到期前进入续期窗口后调用 DigitalPlat 续期接口。默认每天检查一次、到期前 120 天、免费续期 1 年。
+        </div>
+        <div class="form-row">
+          <div>
+            <label>到期前多少天续期</label>
+            <input id="renew-before" type="number" value="120" min="0" max="3650">
+          </div>
+          <div>
+            <label>自动检查周期（小时）</label>
+            <input id="renew-interval-hours" type="number" value="24" min="1" max="8760">
+          </div>
+          <div>
+            <label>续期类型</label>
+            <select id="renew-type">
+              <option value="free">free（推荐）</option>
+              <option value="paid">paid</option>
+            </select>
+          </div>
+          <div>
+            <label>续期年数</label>
+            <input id="renew-years" type="number" value="1" min="1" max="5">
+          </div>
+          <div>
+            <label>域名间最小间隔（秒）</label>
+            <input id="renew-delay-min" type="number" value="3" min="0" max="3600">
+          </div>
+          <div>
+            <label>域名间最大间隔（秒）</label>
+            <input id="renew-delay-max" type="number" value="6" min="0" max="3600">
+          </div>
+          <div class="full">
+            <label class="check-line">
+              <input id="renew-enabled" type="checkbox" checked>
+              <span>
+                <strong>启用后台自动续期检查</strong>
+                <div class="hint">容器运行期间按检查周期执行</div>
+              </span>
+            </label>
+          </div>
+        </div>
+        <div class="actions" style="display:flex; gap: var(--s-3); margin-top: var(--s-4);">
+          <button class="btn btn-primary" onclick="saveRenewal()">保存续期配置</button>
+          <button class="btn btn-secondary" onclick="runRenewal(false)">立即检查并续期</button>
+        </div>
+        <div id="renewal-state" class="hint" style="margin-top: var(--s-4)">尚未运行</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">前缀订阅</div>
+          <div class="card-hint">自动生成候选域名</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="form-row">
+          <div><label>订阅名称</label><input id="sub-name" placeholder="例如：博客域名"></div>
+          <div><label>固定前缀</label><input id="sub-prefix" placeholder="例如：blog"></div>
+          <div><label>域名后缀</label><input id="sub-suffix" value="us.kg"></div>
+          <div>
+            <label>容量类型</label>
+            <select id="sub-slot">
+              <option value="subscription">subscription</option>
+              <option value="paid">paid</option>
+              <option value="free">free</option>
+            </select>
+          </div>
+          <div><label>随机字符长度</label><input id="sub-length" type="number" min="2" max="24" value="6"></div>
+          <div>
+            <label>前缀分隔符</label>
+            <select id="sub-separator">
+              <option value="">无分隔符（推荐）— bloga1b2c3</option>
+              <option value="-">连字符 — blog-a1b2c3</option>
+            </select>
+            <div class="hint">dpdns.org 会强制使用无分隔符</div>
+          </div>
+          <div class="full">
+            <label class="check-line">
+              <input id="sub-auto-cloudflare" type="checkbox" onchange="toggleNameservers()">
+              <span>
+                <strong>注册成功后自动托管到 Cloudflare</strong>
+                <div class="hint">自动创建 Zone、更新 DigitalPlat NS，并显示激活状态</div>
+              </span>
+            </label>
+          </div>
+          <div class="full" id="manual-nameservers">
+            <label>手动 Nameservers</label>
+            <input id="sub-ns1" value="ns1.provider.com" style="margin-bottom: 10px">
+            <input id="sub-ns2" value="ns2.provider.com">
+          </div>
+        </div>
+        <div class="actions" style="margin-top: var(--s-4);">
+          <button class="btn btn-primary" onclick="addSubscription()">创建订阅</button>
+        </div>
+        <div id="subscription-list" class="list" style="margin-top: var(--s-4)"></div>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- Right column -->
+  <div class="stack">
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">启动注册任务</div>
+          <div class="card-hint">Token 自动轮询</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="notice">
+          DigitalPlat 没有独立的域名可用性查询接口。系统会生成唯一候选名并直接注册；网络结果不明确时先回查该 Token 的域名列表，不会盲目重复提交同一个域名。
+        </div>
+        <div class="form-row">
+          <div>
+            <label>前缀订阅</label>
+            <select id="job-subscription"><option value="">请先创建订阅</option></select>
+          </div>
+          <div>
+            <label>目标注册数量</label>
+            <input id="job-count" type="number" min="1" max="100" value="1">
+          </div>
+          <div>
+            <label>最大尝试次数</label>
+            <input id="job-attempts" type="number" min="1" max="1000" value="10">
+          </div>
+          <div>
+            <label>Token 范围</label>
+            <select id="job-token-mode"><option value="all">使用全部启用 Token</option></select>
+          </div>
+          <div>
+            <label>域名操作最小间隔（秒）</label>
+            <input id="job-delay-min" type="number" min="0" max="3600" value="20">
+          </div>
+          <div>
+            <label>域名操作最大间隔（秒）</label>
+            <input id="job-delay-max" type="number" min="0" max="3600" value="45">
+          </div>
+        </div>
+        <div class="actions" style="margin-top: var(--s-4);">
+          <button class="btn btn-primary" id="start-job" onclick="startJob()">开始自动注册</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">注册任务与详细进度</div>
+          <div class="card-hint">每 3 秒刷新</div>
+        </div>
+      </div>
+      <div id="job-list" class="card-body flush"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <div class="card-title">已注册域名</div>
+        </div>
+        <div style="display:flex; gap: var(--s-3); align-items: center;">
+          <span class="hint" id="domain-count">0 个</span>
+          <button class="btn btn-secondary btn-sm" onclick="syncDomains()">从 DigitalPlat 同步</button>
+          <button class="btn btn-ghost btn-sm" onclick="hostAllCloudflare()">托管全部未激活域名</button>
+        </div>
+      </div>
+      <div class="card-body flush">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>域名</th><th>Token</th><th>Cloudflare</th><th>续期</th><th>注册时间</th><th style="width:110px"></th></tr></thead>
+            <tbody id="domain-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/domain_automation.js"></script>
+{% endblock %}

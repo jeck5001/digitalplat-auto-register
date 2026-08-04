@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+
+{% block title %}账户池 · DigitalPlat{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">账户池</h1>
+    <div class="page-sub">池化管理 · 健康检查 · 使用统计 · 日志</div>
+  </div>
+  <div class="page-meta">
+    <div id="updated" class="conn">
+      <span class="conn-dot"></span>
+      <span>正在连接…</span>
+    </div>
+  </div>
+</div>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="metric-label">总账户数</div>
+    <div class="metric-value" id="total-accounts">—</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">可用账户</div>
+    <div class="metric-value ok" id="available-accounts">—</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">池健康度</div>
+    <div class="metric-value accent" id="pool-health">—</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">活跃账户</div>
+    <div class="metric-value info" id="active-accounts">—</div>
+  </div>
+</div>
+
+<div class="tabs">
+  <button class="tab active" data-tab="accounts" onclick="showTab('accounts', this)">账户列表</button>
+  <button class="tab" data-tab="stats" onclick="showTab('stats', this)">统计面板</button>
+  <button class="tab" data-tab="logs" onclick="showTab('logs', this)">日志查看</button>
+  <button class="tab" data-tab="health" onclick="showTab('health', this)">健康检查</button>
+</div>
+
+<!-- ======== Accounts Tab ======== -->
+<div id="tab-accounts" class="tab-content active">
+  <div class="toolbar">
+    <button class="btn btn-primary" onclick="migrate()">⟲ 从旧系统迁移数据</button>
+    <div class="toolbar-end">
+      <button class="btn btn-ghost" onclick="loadAccounts()">刷新</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body flush">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>ID</th><th>用户名</th><th>邮箱</th><th>状态</th><th>使用次数</th><th>成功率</th><th style="width:130px"></th></tr>
+          </thead>
+          <tbody id="accounts-table">
+            <tr><td colspan="7" class="hint">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======== Stats Tab ======== -->
+<div id="tab-stats" class="tab-content">
+  <div class="metrics">
+    <div class="metric">
+      <div class="metric-label">总注册</div>
+      <div class="metric-value" id="stat-total">—</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">成功率</div>
+      <div class="metric-value ok" id="stat-rate">—</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">域名注册</div>
+      <div class="metric-value info" id="stat-domains">—</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">平均耗时</div>
+      <div class="metric-value" id="stat-avgtime">—</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-title">最近注册活动</div>
+    </div>
+    <div class="card-body flush">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>时间</th><th>类型</th><th>结果</th><th>耗时</th><th>错误</th></tr></thead>
+          <tbody id="recent-registrations-table">
+            <tr><td colspan="5" class="hint">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======== Logs Tab ======== -->
+<div id="tab-logs" class="tab-content">
+  <div class="toolbar">
+    <select id="log-level" onchange="loadLogs()">
+      <option value="">全部级别</option>
+      <option value="INFO">INFO</option>
+      <option value="WARNING">WARNING</option>
+      <option value="ERROR">ERROR</option>
+      <option value="DEBUG">DEBUG</option>
+    </select>
+    <div class="toolbar-end">
+      <button class="btn btn-ghost" onclick="loadLogs()">刷新</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body flush">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>时间</th><th>级别</th><th>消息</th><th>上下文</th></tr></thead>
+          <tbody id="logs-table">
+            <tr><td colspan="4" class="hint">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======== Health Tab ======== -->
+<div id="tab-health" class="tab-content">
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <div class="card-title">健康检查</div>
+        <div class="card-hint">每个账户的可用性体检</div>
+      </div>
+    </div>
+    <div class="card-body flush">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>账户 ID</th><th>健康</th><th>问题</th><th>成功率</th></tr></thead>
+          <tbody id="health-table">
+            <tr><td colspan="4" class="hint">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/pool.js"></script>
+{% endblock %}
