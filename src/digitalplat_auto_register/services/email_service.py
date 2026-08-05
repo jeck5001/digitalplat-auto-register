@@ -396,7 +396,7 @@ class MailTDService(EmailService):
                         for msg in messages:
                             logger.info(
                                 f"  Email: subject='{msg.get('subject', '(empty)')}' "
-                                f"from='{msg.get('sender', {}).get('address', '(empty)')}'"
+                                f"from='{self._sender_text(msg) or '(empty)'}'"
                             )
                         
                         # Look for verification email
@@ -428,7 +428,7 @@ class MailTDService(EmailService):
                                         duration=duration,
                                         metadata={
                                             "subject": full_msg.get("subject", ""),
-                                            "sender": full_msg.get("sender", {}).get("address", ""),
+                                            "sender": self._sender_text(full_msg),
                                             "message_id": full_msg.get("id", ""),
                                         }
                                     )
@@ -462,7 +462,7 @@ class MailTDService(EmailService):
                 if final_messages:
                     logger.warning(f"Found {len(final_messages)} email(s) but none matched verification patterns:")
                     for msg in final_messages:
-                        logger.warning(f"  - '{msg.get('subject')}' from {msg.get('sender', {}).get('address')}")
+                        logger.warning(f"  - '{msg.get('subject')}' from {self._sender_text(msg)}")
             except Exception:
                 pass
             
@@ -521,10 +521,7 @@ class MailTDService(EmailService):
                     
                     if messages:
                         for msg in messages:
-                            sender_info = msg.get("sender", {})
-                            sender_address = sender_info.get("address", "")
-                            sender_name = sender_info.get("name", "")
-                            sender_text = f"{sender_name} {sender_address}".strip()
+                            sender_text = self._sender_text(msg)
                             
                             if sender_pattern.lower() in sender_text.lower():
                                 full_msg = await self._fetch_message_detail(msg["id"])
@@ -627,9 +624,29 @@ class MailTDService(EmailService):
             return None
     
     # --- Code extraction helpers ---
+
+    @staticmethod
+    def _sender_text(message: Dict[str, Any]) -> str:
+        """Normalize mail.td sender fields from current and legacy responses."""
+        if not isinstance(message, dict):
+            return ""
+
+        sender = message.get("sender", "")
+        if isinstance(sender, dict):
+            sender_text = f"{sender.get('name', '')} {sender.get('address', '')}".strip()
+        else:
+            sender_text = str(sender).strip()
+
+        from_address = str(message.get("from", "") or "").strip()
+        if from_address and from_address.lower() not in sender_text.lower():
+            sender_text = f"{sender_text} {from_address}".strip()
+        return sender_text
     
     def _is_verification_email(self, message: Dict[str, Any]) -> bool:
         """Check if a message looks like a verification email"""
+        if not isinstance(message, dict):
+            return False
+
         # DigitalPlat-specific senders
         digitalplat_patterns = [
             "digitalplat",
@@ -649,8 +666,7 @@ class MailTDService(EmailService):
         ]
         text = (
             f"{message.get('subject', '')} "
-            f"{message.get('sender', {}).get('name', '')} "
-            f"{message.get('sender', {}).get('address', '')}"
+            f"{self._sender_text(message)}"
         ).lower()
         return (
             any(dp in text for dp in digitalplat_patterns)

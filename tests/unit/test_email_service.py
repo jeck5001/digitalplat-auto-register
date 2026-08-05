@@ -83,6 +83,55 @@ def test_is_verification_email():
     })
 
 
+def test_is_verification_email_accepts_current_mailtd_sender_shape():
+    service = build_service()
+
+    assert service._is_verification_email({
+        "subject": "Verify your email",
+        "sender": "noreply@digitalplat.org",
+        "from": "DigitalPlat <noreply@digitalplat.org>",
+    })
+
+
+def test_check_verification_email_accepts_string_sender(monkeypatch):
+    service = build_service()
+    service.auth_token = "token"
+    service.account_id = "account-id"
+
+    async def mock_fetch_messages():
+        return [{
+            "id": "message-id",
+            "subject": "Verify your email",
+            "sender": "noreply@digitalplat.org",
+            "from": "DigitalPlat <noreply@digitalplat.org>",
+        }]
+
+    async def mock_fetch_message_detail(message_id):
+        assert message_id == "message-id"
+        return {
+            "id": message_id,
+            "subject": "Verify your email",
+            "sender": "noreply@digitalplat.org",
+            "text_body": "Your verification code is: 654321",
+            "html_body": "",
+        }
+
+    monkeypatch.setattr(service, "_fetch_messages", mock_fetch_messages)
+    monkeypatch.setattr(service, "_fetch_message_detail", mock_fetch_message_detail)
+
+    result = asyncio.run(
+        service.check_verification_email(
+            "test@example.com",
+            timeout=1,
+            check_interval=0,
+        )
+    )
+
+    assert result.found is True
+    assert result.code == "654321"
+    assert result.metadata["sender"] == "noreply@digitalplat.org"
+
+
 def test_wait_for_specific_sender_no_auth(monkeypatch):
     service = build_service()
 
