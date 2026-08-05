@@ -16,6 +16,12 @@ from urllib.parse import quote
 
 from loguru import logger
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+
+try:
+    from camoufox.async_api import AsyncCamoufox
+except ImportError:
+    AsyncCamoufox = None
+
 from bs4 import BeautifulSoup
 
 from ..types import EmailCredentials, EmailProvider
@@ -157,8 +163,10 @@ class MailTDService(EmailService):
             await self._init_browser()
             
             # Navigate to mail.td - email is auto-generated
-            await self.page.goto(self.base_url, wait_until="networkidle")
+            await self.page.goto(self.base_url, wait_until="domcontentloaded")
             logger.debug("Navigated to mail.td")
+            # Wait briefly for the email address to render
+            await asyncio.sleep(2)
             
             # Extract the auto-generated email address
             email = await self._extract_email_address()
@@ -439,20 +447,22 @@ class MailTDService(EmailService):
     # --- Browser interaction helpers ---
     
     async def _init_browser(self):
-        """Initialize Playwright browser for mail.td interaction"""
+        """Initialize Camoufox browser for mail.td interaction"""
         if not self.browser:
             self.playwright = await async_playwright().start()
-            try:
-                self.browser = await self.playwright.chromium.launch(headless=True)
-            except Exception as exc:
-                if "Executable doesn't exist" not in str(exc):
-                    raise
-                logger.info("Playwright Chromium is unavailable; using system Chrome for mail.td")
-                self.browser = await self.playwright.chromium.launch(
-                    channel="chrome", headless=True
-                )
-            self.context = await self.browser.new_context(viewport={'width': 1280, 'height': 720})
+            browser_args = {
+                "headless": True,
+            }
+            camoufox = AsyncCamoufox(**browser_args)
+            self.browser = await camoufox.start()
+            self.context = await self.browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                locale="en-US",
+            )
             self.page = await self.context.new_page()
+            await self.page.set_extra_http_headers({
+                "Accept-Language": "en-US,en;q=0.9",
+            })
     
     async def _page_is_usable(self) -> bool:
         """Check if the page is still open and usable"""
@@ -474,7 +484,7 @@ class MailTDService(EmailService):
                 await self._init_browser()
             if not self.page:
                 return False
-            await self.page.goto(self.base_url, wait_until="domcontentloaded", timeout=30000)
+            await self.page.goto(self.base_url, wait_until="domcontentloaded", timeout=60000)
             await asyncio.sleep(2)
             return True
         except Exception as e:
