@@ -266,7 +266,21 @@ class DigitalPlatRegistrar:
             self.registration_result.verification_result = verification_result
             
             if not verification_result.found:
-                raise RegistrationError("Failed to receive verification email", "email_verification")
+                # Email didn't arrive - try to get code from browser page directly
+                logger.warning("Email verification failed, trying to extract code from browser page...")
+                page_code = await self._extract_code_from_browser_page()
+                if page_code:
+                    verification_result = VerificationEmailResult(
+                        found=True,
+                        code=page_code,
+                        duration=0,
+                        metadata={"source": "browser_page_fallback"},
+                    )
+                    self.registration_result.verification_result = verification_result
+                else:
+                    # Capture the page state for debugging
+                    await self._capture_verification_debug_state()
+                    raise RegistrationError("Failed to receive verification email", "email_verification")
             
             self._add_step_result("verification_email_retrieval", StepResult(
                 name="verification_email_retrieval",
@@ -425,6 +439,64 @@ class DigitalPlatRegistrar:
         return await self.browser_service.handle_verification_popup(
             verification_code
         )
+
+    async def _extract_code_from_browser_page(self) -> Optional[str]:
+        """Fallback: try to extract verification code directly from the browser page.
+        
+        Some sites display the verification code on the page itself rather than
+        emailing it. This checks the current page content for common code patterns.
+        """
+        if not self.browser_service or not self.browser_service.page:
+            return None
+
+        try:
+            import re
+            page = self.browser_service.page
+            content = await page.content()
+            text = await page.inner_text("body")
+
+            # Common verification code patterns in page text
+            patterns = [
+                r'(?:code|验证码|verification code|confirm code)\s*[：:=\-]?\s*(\d{4,8})',
+                r'(?:code|验证码|verification|confirmation)\s+(?:is)?\s*[：:=]?\s*(\d{4,8})',
+                r'(?:enter|input|use)\s+(?:code\s+)?(\d{4,8})',
+                r'(?:认证码|验证码|识别码|校验码)[：:=\s]*(\d{4,8})',
+                r'class="[^"]*(?:code|verify|token)[^"]*"[^>]*>\s*(\d{4,8})\s*<',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    logger.info(f"Found code on page: {match.group(1)}")
+                    return match.group(1)
+
+            # Fallback: any 6-digit number in text
+            numbers = re.findall(r'\b(\d{6})\b', text)
+            if numbers:
+                logger.info(f"Fallback: found 6-digit number on page: {numbers[0]}")
+                return numbers[0]
+        except Exception as e:
+            logger.debug(f"Failed to extract code from page: {e}")
+        return None
+
+    async def _capture_verification_debug_state(self):
+        """Capture browser page state for debugging when email verification fails."""
+        if not self.browser_service or not self.browser_service.page:
+            return
+        try:
+            page = self.browser_service.page
+            url = page.url
+            title = await page.title()
+            text = await page.inner_text("body")
+            logger.info(f"DEBUG - Page URL: {url}")
+            logger.info(f"DEBUG - Page Title: {title}")
+            logger.info(f"DEBUG - Page Text (first 1000 chars): {text[:1000]}")
+
+            # Take a screenshot for visual debugging
+            screenshot = await self.browser_service.take_screenshot("verification_debug")
+            if screenshot:
+                logger.info(f"DEBUG - Screenshot saved: {screenshot}")
+        except Exception as e:
+            logger.debug(f"Failed to capture debug state: {e}")
     
     def _prepare_user_profile(
         self,
