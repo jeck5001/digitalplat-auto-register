@@ -9,24 +9,20 @@ import asyncio
 import time
 import re
 import json
+import random
+import string
+import hashlib
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any, Tuple
-from urllib.parse import quote
+from datetime import datetime
+from typing import Optional, List, Dict, Any
 
+import httpx
 from loguru import logger
-from playwright.async_api import async_playwright, Page, Browser, BrowserContext
-
-try:
-    from camoufox.async_api import AsyncCamoufox
-except ImportError:
-    AsyncCamoufox = None
-
-from bs4 import BeautifulSoup
+from argon2.low_level import hash_secret_raw, Type
 
 from ..types import EmailCredentials, EmailProvider
 from ..core.result import EmailResult, VerificationEmailResult
-from ..exceptions import EmailServiceError, TimeoutError, BrowserAutomationError
+from ..exceptions import EmailServiceError
 
 
 class EmailService(ABC):
@@ -35,12 +31,6 @@ class EmailService(ABC):
     """
     
     def __init__(self, config: EmailCredentials):
-        """
-        Initialize the email service
-        
-        Args:
-            config: Email service configuration
-        """
         self.config = config
         self.current_email: Optional[str] = None
         self.email_created_at: Optional[datetime] = None
@@ -100,23 +90,26 @@ class EmailService(ABC):
 
 class MailTDService(EmailService):
     """
-    mail.td temporary email service implementation
+    mail.td temporary email service implementation using pure HTTP API.
     
-    This implementation uses browser automation to interact with the mail.td
-    web interface since the service doesn't provide public APIs for automation.
+    The mail.td API uses:
+    - Argon2id to derive auth_key from password (salt = SHA-256 of email)
+    - SHA-256 proof-of-work for rate limiting (hash must start with N zero bits)
+    - JWT tokens for authentication
     
-    The new mail.td UI (2026-08):
-    - Email address is auto-generated on page load
-    - Credentials (email + password + token) are stored in localStorage
-    - Messages are fetched via API: GET /api/accounts/{id}/messages
-    - Individual message content: GET /api/accounts/{id}/messages/{msg_id}
+    API endpoints:
+    - GET /api/domains - List available email domains
+    - POST /api/accounts - Create new email account (with PoW)
+    - GET /api/accounts/{id}/messages?page=1 - List messages
+    - GET /api/accounts/{id}/messages/{msg_id} - Get message detail
     """
     
-    # CSS selectors for the new mail.td UI
-    EMAIL_ADDRESS_SELECTOR = "code[class*='CredentialCard_addr']"
-    PASSWORD_SELECTOR = "button[class*='CredentialCard_pw']"
-    CHANGE_EMAIL_BUTTON = "has-text('换一个')"
-    REFRESH_BUTTON = "has-text('刷新')"
+    # Default PoW difficulty (from mail.td source code)
+    DEFAULT_DIFFICULTY = 15
+    # Characters used for random email username
+    EMAIL_USER_CHARS = string.ascii_lowercase + string.digits
+    # Characters used for random password
+    PASSWORD_CHARS = string.ascii_letters + string.digits + "!@#$%"
     
     def __init__(self, config: EmailCredentials):
         """
@@ -130,55 +123,193 @@ class MailTDService(EmailService):
             
         super().__init__(config)
         self.base_url = "https://mail.td"
-        self.playwright = None
-        self.browser: Optional[Browser] = None
-        self.context: Optional[BrowserContext] = None
-        self.page: Optional[Page] = None
+        self.client: Optional[httpx.AsyncClient] = None
         
         # Auth state
         self.auth_token: Optional[str] = None
         self.account_id: Optional[str] = None
         self.password: Optional[str] = None
+        self.domains: List[str] = []
+        
+        # PoW difficulty (auto-increases if server requests retry)
+        self._current_difficulty = self.DEFAULT_DIFFICULTY
+        self._retry_token: Optional[str] = None
+    
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create HTTP client"""
+        if self.client is None or self.client.is_closed:
+            self.client = httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=30,
+                follow_redirects=True,
+            )
+        return self.client
+    
+    async def _get_domains(self) -> List[str]:
+        """Fetch available email domains from mail.td"""
+        client = await self._get_client()
+        resp = await client.get("/api/domains")
+        
+        if resp.status_code != 200:
+            raise EmailServiceError(f"Failed to get domains: {resp.status_code} {resp.text[:200]}")
+        
+        data = resp.json()
+        domains = data.get("domains", [])
+        active_domains = [d["domain"] for d in domains if d.get("is_active", True)]
+        
+        if not active_domains:
+            active_domains = [d["domain"] for d in domains]
+        
+        if not active_domains:
+            raise EmailServiceError("No available domains from mail.td")
+        
+        self.domains = active_domains
+        return active_domains
+    
+    def _generate_email_user(self, length: int = 6) -> str:
+        """Generate random email username"""
+        return ''.join(random.choices(self.EMAIL_USER_CHARS, k=length))
+    
+    def _generate_password(self, length: int = 8) -> str:
+        """Generate random password"""
+        return ''.join(random.choices(self.PASSWORD_CHARS, k=length))
+    
+    @staticmethod
+    def _derive_auth_key(email: str, password: str) -> str:
+        """
+        Derive auth_key using argon2id (same algorithm as mail.td JS code).
+        
+        mail.td derives auth_key = argon2id(password, salt=SHA-256(email))
+        with parameters: time_cost=3, memory_cost=16384, parallelism=1, hash_length=32
+        """
+        salt = hashlib.sha256(email.lower().strip().encode()).digest()
+        result = hash_secret_raw(
+            secret=password.encode(),
+            salt=salt,
+            time_cost=3,
+            memory_cost=16384,
+            parallelism=1,
+            hash_len=32,
+            type=Type.ID,
+        )
+        return result.hex()
+    
+    @staticmethod
+    def _solve_pow(address: str, difficulty: int) -> dict:
+        """
+        Solve SHA-256 proof-of-work challenge.
+        
+        Find a nonce such that SHA-256(address + timestamp + nonce) starts
+        with `difficulty` zero bits.
+        
+        Returns:
+            Dict with 't' (timestamp), 'n' (nonce), 'd' (difficulty)
+        """
+        base = address.lower().strip()
+        timestamp = int(time.time())
+        nonce = 0
+        
+        full_zero_bytes = difficulty // 8
+        remaining_bits = difficulty % 8
+        mask = (255 << (8 - remaining_bits)) & 255 if remaining_bits else 0
+        
+        while True:
+            attempt = f"{base}{timestamp}{nonce}"
+            hash_bytes = hashlib.sha256(attempt.encode("utf-8")).digest()
+            
+            valid = True
+            for i in range(full_zero_bytes):
+                if hash_bytes[i] != 0:
+                    valid = False
+                    break
+            
+            if valid and remaining_bits > 0 and full_zero_bytes < len(hash_bytes):
+                if (hash_bytes[full_zero_bytes] & mask) != 0:
+                    valid = False
+            
+            if valid:
+                return {"t": timestamp, "n": str(nonce), "d": difficulty}
+            nonce += 1
     
     async def create_temporary_email(self) -> EmailResult:
         """
-        Create a new temporary email address using mail.td UI.
+        Create a new temporary email address using mail.td HTTP API.
         
-        The new mail.td UI automatically generates an email on page load.
-        We just need to extract the email address, password, and auth token.
+        No browser needed - uses pure HTTP with Argon2id + SHA-256 PoW.
         
         Returns:
             EmailResult with the created email details
-            
-        Raises:
-            EmailServiceError: If email creation fails
-            BrowserAutomationError: If browser automation fails
         """
         start_time = time.time()
         
         try:
-            logger.info("Creating temporary email using mail.td (new UI)")
+            logger.info("Creating temporary email using mail.td HTTP API")
             
-            # Initialize browser
-            await self._init_browser()
+            # Get available domains
+            domains = await self._get_domains()
+            domain = random.choice(domains)
             
-            # Navigate to mail.td - email is auto-generated
-            await self.page.goto(self.base_url, wait_until="domcontentloaded")
-            logger.debug("Navigated to mail.td")
-            # Wait briefly for the email address to render
-            await asyncio.sleep(2)
+            # Generate random email and password
+            email_user = self._generate_email_user(6)
+            email = f"{email_user}@{domain}"
+            password = self._generate_password(8)
             
-            # Extract the auto-generated email address
-            email = await self._extract_email_address()
-            if not email:
-                raise EmailServiceError("Failed to extract email address from mail.td")
+            logger.debug(f"Generated email: {email}, password: {password}")
             
-            # Extract the password
-            self.password = await self._extract_password()
+            # Derive auth_key
+            t0 = time.time()
+            auth_key = self._derive_auth_key(email, password)
+            logger.debug(f"Auth key derived ({time.time()-t0:.2f}s)")
             
-            # Extract auth token and account ID from localStorage
-            await self._extract_auth_state()
+            # Solve proof-of-work
+            t0 = time.time()
+            pow_result = self._solve_pow(email, self._current_difficulty)
+            logger.debug(f"PoW solved: nonce={pow_result['n']}, difficulty={pow_result['d']} ({time.time()-t0:.3f}s)")
             
+            # Create account via API
+            client = await self._get_client()
+            payload = {
+                "address": email,
+                "auth_key": auth_key,
+                "pow": pow_result,
+            }
+            # Include retry token if retrying after server requested higher difficulty
+            if self._retry_token:
+                payload["pow"]["token"] = self._retry_token
+                self._retry_token = None
+            
+            resp = await client.post("/api/accounts", json=payload)
+            
+            # Handle retry (server asks for higher difficulty)
+            if resp.status_code != 201:
+                resp_data = resp.json() if resp.text else {}
+                if resp_data.get("status") == "retry":
+                    new_diff = resp_data.get("required_difficulty", self._current_difficulty)
+                    retry_token = resp_data.get("token")
+                    logger.debug(f"Server requested retry with difficulty={new_diff}")
+                    self._retry_token = retry_token
+                    self._current_difficulty = new_diff
+                    
+                    # Retry PoW with new difficulty
+                    t0 = time.time()
+                    pow_result = self._solve_pow(email, new_diff)
+                    logger.debug(f"PoW solved (retry): difficulty={new_diff} ({time.time()-t0:.3f}s)")
+                    
+                    payload["pow"] = pow_result
+                    if retry_token:
+                        payload["pow"]["token"] = retry_token
+                    
+                    resp = await client.post("/api/accounts", json=payload)
+            
+            if resp.status_code != 201:
+                raise EmailServiceError(
+                    f"Account creation failed: {resp.status_code} {resp.text[:300]}"
+                )
+            
+            account = resp.json()
+            self.account_id = account["id"]
+            self.auth_token = account["token"]
+            self.password = password
             self.current_email = email
             self.email_created_at = datetime.now()
             
@@ -195,9 +326,11 @@ class MailTDService(EmailService):
                 }
             )
             
-            logger.info(f"Created new email: {self.current_email} (account: {self.account_id})")
+            logger.info(f"Created new email: {self.current_email} ({duration:.2f}s)")
             return result
             
+        except EmailServiceError:
+            raise
         except Exception as e:
             duration = time.time() - start_time
             error_msg = f"Failed to create email on mail.td: {str(e)}"
@@ -217,14 +350,10 @@ class MailTDService(EmailService):
         check_interval: int = 5
     ) -> VerificationEmailResult:
         """
-        Check for DigitalPlat verification email using mail.td API.
-        
-        Uses the stored auth token to call the messages API directly:
-        - GET /api/accounts/{account_id}/messages?page=1
-        - GET /api/accounts/{account_id}/messages/{message_id}
+        Check for DigitalPlat verification email using mail.td HTTP API.
         
         Args:
-            email: Email address to check (full email address)
+            email: Email address to check
             timeout: Maximum time to wait for email in seconds
             check_interval: Time between checks in seconds
             
@@ -234,23 +363,11 @@ class MailTDService(EmailService):
         logger.info(f"Waiting for verification email at {email}")
         start_time = time.time()
         
-        # If we don't have auth state, try to recover from the page
-        if not self.auth_token or not self.account_id:
-            if not await self._page_is_usable():
-                ready = await self._navigate_to_inbox()
-                if not ready:
-                    return VerificationEmailResult(
-                        found=False,
-                        duration=time.time() - start_time,
-                        error="Temporary mailbox page is unavailable",
-                    )
-            await self._extract_auth_state()
-        
         if not self.auth_token or not self.account_id:
             return VerificationEmailResult(
                 found=False,
                 duration=time.time() - start_time,
-                error="Failed to obtain auth token for mail.td API",
+                error="Failed to obtain auth token for mail.td API (call create_temporary_email first)",
             )
         
         try:
@@ -262,7 +379,6 @@ class MailTDService(EmailService):
                 logger.debug(f"Checking for verification email (attempt {check_count})")
                 
                 try:
-                    # Fetch messages via API
                     messages = await self._fetch_messages()
                     
                     if messages:
@@ -291,23 +407,15 @@ class MailTDService(EmailService):
                                         }
                                     )
                                     
-                                    logger.info(f"Found verification code for {email}")
+                                    logger.info(f"Found verification code: {code} ({duration:.2f}s)")
                                     return result
                                 else:
                                     logger.debug(
                                         f"Email matched but no code found: {full_msg.get('subject', '')}"
                                     )
-                    
-                    # If this isn't the last iteration, refresh the inbox UI
-                    # to trigger any lazy-loaded state and wait before retrying
-                    if time.time() + check_interval < end_time:
-                        await self._refresh_inbox()
                 
                 except Exception as e:
                     logger.debug(f"Error checking emails: {str(e)}")
-                    # Try to recover the page session
-                    if not await self._page_is_usable():
-                        await self._navigate_to_inbox()
                 
                 # Wait before next check
                 if time.time() + check_interval < end_time:
@@ -318,7 +426,7 @@ class MailTDService(EmailService):
             # Timeout
             duration = time.time() - start_time
             error_msg = f"Verification email not received within {timeout} seconds"
-            logger.error(error_msg)
+            logger.warning(error_msg)
             
             return VerificationEmailResult(
                 found=False,
@@ -348,7 +456,7 @@ class MailTDService(EmailService):
         Wait for email from specific sender pattern.
         
         Args:
-            email: Email address to monitor (full email address)
+            email: Email address to monitor
             sender_pattern: Pattern to match sender (can be partial)
             timeout: Maximum time to wait in seconds
             check_interval: Time between checks in seconds
@@ -358,18 +466,6 @@ class MailTDService(EmailService):
         """
         logger.info(f"Waiting for email from sender matching: {sender_pattern}")
         start_time = time.time()
-        
-        # If we don't have auth state, try to recover from the page
-        if not self.auth_token or not self.account_id:
-            if not await self._page_is_usable():
-                ready = await self._navigate_to_inbox()
-                if not ready:
-                    return VerificationEmailResult(
-                        found=False,
-                        duration=time.time() - start_time,
-                        error="Temporary mailbox page was closed or became unavailable",
-                    )
-            await self._extract_auth_state()
         
         if not self.auth_token or not self.account_id:
             return VerificationEmailResult(
@@ -383,7 +479,6 @@ class MailTDService(EmailService):
             
             while time.time() < end_time:
                 try:
-                    # Fetch messages via API
                     messages = await self._fetch_messages()
                     
                     if messages:
@@ -394,7 +489,6 @@ class MailTDService(EmailService):
                             sender_text = f"{sender_name} {sender_address}".strip()
                             
                             if sender_pattern.lower() in sender_text.lower():
-                                # Get full message content
                                 full_msg = await self._fetch_message_detail(msg["id"])
                                 if not full_msg:
                                     full_msg = msg
@@ -416,16 +510,12 @@ class MailTDService(EmailService):
                 
                 except Exception as e:
                     logger.debug(f"Error checking for sender {sender_pattern}: {str(e)}")
-                    if not await self._page_is_usable():
-                        await self._navigate_to_inbox()
                 
-                # Wait before next check
                 if time.time() + check_interval < end_time:
                     await asyncio.sleep(check_interval)
                 else:
                     break
             
-            # Timeout
             duration = time.time() - start_time
             return VerificationEmailResult(
                 found=False,
@@ -444,153 +534,31 @@ class MailTDService(EmailService):
                 error=error_msg
             )
     
-    # --- Browser interaction helpers ---
-    
-    async def _init_browser(self):
-        """Initialize Camoufox browser for mail.td interaction"""
-        if not self.browser:
-            self.playwright = await async_playwright().start()
-            browser_args = {
-                "headless": True,
-            }
-            camoufox = AsyncCamoufox(**browser_args)
-            self.browser = await camoufox.start()
-            self.context = await self.browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                locale="en-US",
-            )
-            self.page = await self.context.new_page()
-            await self.page.set_extra_http_headers({
-                "Accept-Language": "en-US,en;q=0.9",
-            })
-    
-    async def _page_is_usable(self) -> bool:
-        """Check if the page is still open and usable"""
-        if not self.page:
-            return False
-        try:
-            return not self.page.is_closed()
-        except Exception:
-            return False
-    
-    async def _navigate_to_inbox(self) -> bool:
-        """
-        Navigate to mail.td main page to restore the inbox session.
-        
-        The new mail.td main page auto-logins if the auth token is in localStorage.
-        """
-        try:
-            if not await self._page_is_usable():
-                await self._init_browser()
-            if not self.page:
-                return False
-            await self.page.goto(self.base_url, wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(2)
-            return True
-        except Exception as e:
-            logger.debug(f"Error navigating to inbox: {str(e)}")
-            return False
-    
-    async def _extract_email_address(self) -> Optional[str]:
-        """Extract the email address from the mail.td UI"""
-        try:
-            # Wait for the email address element to appear
-            email_element = self.page.locator(self.EMAIL_ADDRESS_SELECTOR).first
-            await email_element.wait_for(state="visible", timeout=15000)
-            
-            for _ in range(50):
-                text = (await email_element.text_content() or "").strip()
-                if re.fullmatch(r"[^@\s]+@[^@\s]+", text):
-                    return text
-                await self.page.wait_for_timeout(250)
-            
-            return None
-        except Exception as e:
-            logger.debug(f"Error extracting email address: {str(e)}")
-            return None
-    
-    async def _extract_password(self) -> Optional[str]:
-        """Extract the password from the mail.td UI"""
-        try:
-            password_element = self.page.locator(self.PASSWORD_SELECTOR).first
-            await password_element.wait_for(state="visible", timeout=10000)
-            password = (await password_element.text_content() or "").strip()
-            return password if password else None
-        except Exception as e:
-            logger.debug(f"Error extracting password: {str(e)}")
-            return None
-    
-    async def _extract_auth_state(self):
-        """Extract auth token and account ID from localStorage"""
-        try:
-            if not self.page:
-                return
-            self.auth_token = await self.page.evaluate(
-                "localStorage.getItem('tempmail_token')"
-            )
-            self.account_id = await self.page.evaluate(
-                "localStorage.getItem('tempmail_account_id')"
-            )
-            if self.auth_token:
-                logger.debug(f"Auth token obtained (account: {self.account_id})")
-        except Exception as e:
-            logger.debug(f"Error extracting auth state: {str(e)}")
-    
-    async def _refresh_inbox(self):
-        """Refresh the inbox by clicking the refresh button or reloading"""
-        try:
-            if not await self._page_is_usable():
-                return
-            # Try clicking the refresh button first
-            refresh_button = self.page.get_by_role("button", name="Refresh", exact=True)
-            if await refresh_button.count():
-                await refresh_button.first.click()
-            else:
-                # Fall back to page reload
-                await self.page.reload(wait_until="domcontentloaded")
-            await self.page.wait_for_timeout(1000)
-        except Exception as e:
-            logger.debug(f"Error refreshing inbox: {str(e)}")
-    
-    # --- API helpers ---
+    # --- HTTP API helpers ---
     
     async def _fetch_messages(self) -> List[Dict[str, Any]]:
         """
         Fetch messages for the current account using mail.td API.
         
         Returns:
-            List of message summary dicts (id, subject, sender, created_at, is_read)
+            List of message summary dicts
         """
         if not self.auth_token or not self.account_id:
             return []
         
         try:
-            if not self.page:
-                return []
-            
-            result = await self.page.evaluate(
-                """
-                async ({accountId, token}) => {
-                    try {
-                        const resp = await fetch(`/api/accounts/${accountId}/messages?page=1`, {
-                            credentials: 'include',
-                            headers: {
-                                'Authorization': `Bearer ${token}`,
-                                'Content-Type': 'application/json'
-                            }
-                        });
-                        if (!resp.ok) return null;
-                        const data = await resp.json();
-                        return data.messages || [];
-                    } catch (e) {
-                        return null;
-                    }
-                }
-                """,
-                {"accountId": self.account_id, "token": self.auth_token}
+            client = await self._get_client()
+            resp = await client.get(
+                f"/api/accounts/{self.account_id}/messages?page=1",
+                headers={"Authorization": f"Bearer {self.auth_token}"}
             )
             
-            return result or []
+            if resp.status_code != 200:
+                logger.debug(f"Fetch messages error: {resp.status_code}")
+                return []
+            
+            data = resp.json()
+            return data.get("messages", [])
         except Exception as e:
             logger.debug(f"Error fetching messages: {str(e)}")
             return []
@@ -606,34 +574,21 @@ class MailTDService(EmailService):
             return None
         
         try:
-            if not self.page:
-                return None
-            
-            result = await self.page.evaluate(
-                """
-                async ({accountId, messageId, token}) => {
-                    try {
-                        const resp = await fetch(`/api/accounts/${accountId}/messages/${messageId}`, {
-                            credentials: 'include',
-                            headers: {
-                                'Authorization': `Bearer ${token}`,
-                                'Content-Type': 'application/json'
-                            }
-                        });
-                        if (!resp.ok) return null;
-                        return await resp.json();
-                    } catch (e) {
-                        return null;
-                    }
-                }
-                """,
-                {"accountId": self.account_id, "messageId": message_id, "token": self.auth_token}
+            client = await self._get_client()
+            resp = await client.get(
+                f"/api/accounts/{self.account_id}/messages/{message_id}",
+                headers={"Authorization": f"Bearer {self.auth_token}"}
             )
             
-            return result
+            if resp.status_code != 200:
+                return None
+            
+            return resp.json()
         except Exception as e:
             logger.debug(f"Error fetching message detail: {str(e)}")
             return None
+    
+    # --- Code extraction helpers ---
     
     def _is_verification_email(self, message: Dict[str, Any]) -> bool:
         """Check if a message looks like a verification email"""
@@ -692,39 +647,17 @@ class MailTDService(EmailService):
         
         return None
     
-    # --- Legacy UI interaction methods (kept for fallback) ---
-    
-    async def _click_change_email(self):
-        """Click the '换一个' button to get a new random email"""
-        try:
-            button = self.page.get_by_role("button", name="↻ 换一个")
-            if await button.count():
-                await button.first.click()
-                await asyncio.sleep(2)
-                # Extract the new email
-                new_email = await self._extract_email_address()
-                if new_email:
-                    self.current_email = new_email
-                # Re-extract auth state (account ID changes)
-                await self._extract_auth_state()
-                logger.debug(f"Changed to new email: {self.current_email}")
-        except Exception as e:
-            logger.debug(f"Error changing email: {str(e)}")
+    # --- Lifecycle ---
     
     async def close(self):
-        """Close browser resources"""
-        if self.browser:
-            await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
+        """Close HTTP client"""
+        if self.client and not self.client.is_closed:
+            await self.client.aclose()
+        self.client = None
         self._clear_auth_state()
-        self.browser = None
-        self.context = None
-        self.page = None
-        self.playwright = None
-
+    
     def _clear_auth_state(self):
-        """Clear authentication state. Separated for testability."""
+        """Clear authentication state."""
         self.auth_token = None
         self.account_id = None
         self.password = None
