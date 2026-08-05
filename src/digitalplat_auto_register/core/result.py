@@ -77,6 +77,7 @@ class EmailResult:
     inbox_url: Optional[str] = None
     duration: Optional[float] = None
     error: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -91,6 +92,7 @@ class VerificationEmailResult:
     content: Optional[str] = None
     duration: Optional[float] = None
     error: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
