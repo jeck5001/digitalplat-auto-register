@@ -155,7 +155,7 @@ class MailTDService(EmailService):
         
         data = resp.json()
         domains = data.get("domains", [])
-        active_domains = [d["domain"] for d in domains if d.get("is_active", True)]
+        active_domains = [d["domain"] for d in domains]
         
         if not active_domains:
             active_domains = [d["domain"] for d in domains]
@@ -367,7 +367,7 @@ class MailTDService(EmailService):
             return VerificationEmailResult(
                 found=False,
                 duration=time.time() - start_time,
-                error="Failed to obtain auth token for mail.td API (call create_temporary_email first)",
+                error="No auth token available - call create_temporary_email first",
             )
         
         try:
@@ -382,15 +382,32 @@ class MailTDService(EmailService):
                     messages = await self._fetch_messages()
                     
                     if messages:
-                        # Look for DigitalPlat verification email
+                        logger.debug(f"Received {len(messages)} email(s)")
+                        # Debug: log ALL received emails
+                        for msg in messages:
+                            logger.info(
+                                f"  Email: subject='{msg.get('subject', '(empty)')}' "
+                                f"from='{msg.get('sender', {}).get('address', '(empty)')}'"
+                            )
+                        
+                        # Look for verification email
                         for msg in messages:
                             if self._is_verification_email(msg):
-                                # Get full message content
                                 full_msg = await self._fetch_message_detail(msg["id"])
                                 if not full_msg:
                                     full_msg = msg
                                 
-                                # Extract verification code
+                                logger.info(f"  verification email found: {full_msg.get('subject')}")
+                                
+                                # Debug: log the full content
+                                text_body = full_msg.get("text_body", "") or ""
+                                html_body = full_msg.get("html_body", "") or ""
+                                logger.info(f"  text_body length: {len(text_body)}")
+                                logger.info(f"  text_body preview: {text_body[:1000]}")
+                                if html_body:
+                                    logger.info(f"  html_body length: {len(html_body)}")
+                                    logger.info(f"  html_body preview: {html_body[:1000]}")
+                                
                                 code = self._extract_code_from_message(full_msg)
                                 
                                 if code:
@@ -406,13 +423,16 @@ class MailTDService(EmailService):
                                             "message_id": full_msg.get("id", ""),
                                         }
                                     )
-                                    
                                     logger.info(f"Found verification code: {code} ({duration:.2f}s)")
                                     return result
                                 else:
-                                    logger.debug(
-                                        f"Email matched but no code found: {full_msg.get('subject', '')}"
+                                    logger.warning(
+                                        f"Email matched but no code extracted from: {full_msg.get('subject', '')}"
                                     )
+                                    # Save full content for debugging
+                                    logger.info(f"Full message JSON: {json.dumps(full_msg, indent=2, ensure_ascii=False)[:2000]}")
+                    else:
+                        logger.debug(f"  No emails yet (check {check_count})")
                 
                 except Exception as e:
                     logger.debug(f"Error checking emails: {str(e)}")
@@ -423,15 +443,24 @@ class MailTDService(EmailService):
                 else:
                     break
             
-            # Timeout
+            # Timeout - log what we did receive for debugging
             duration = time.time() - start_time
-            error_msg = f"Verification email not received within {timeout} seconds"
-            logger.warning(error_msg)
+            logger.warning(f"No verification email found in {timeout}s")
+            
+            # Final attempt: log all messages for debugging
+            try:
+                final_messages = await self._fetch_messages()
+                if final_messages:
+                    logger.warning(f"Found {len(final_messages)} email(s) but none matched verification patterns:")
+                    for msg in final_messages:
+                        logger.warning(f"  - '{msg.get('subject')}' from {msg.get('sender', {}).get('address')}")
+            except Exception:
+                pass
             
             return VerificationEmailResult(
                 found=False,
                 duration=duration,
-                error=error_msg
+                error=f"Verification email not received within {timeout} seconds",
             )
             
         except Exception as e:
@@ -592,20 +621,32 @@ class MailTDService(EmailService):
     
     def _is_verification_email(self, message: Dict[str, Any]) -> bool:
         """Check if a message looks like a verification email"""
-        patterns = [
+        # DigitalPlat-specific senders
+        digitalplat_patterns = [
+            "digitalplat",
+            "@digitalplat.org",
+            "@domain.digitalplat.org",
+        ]
+        generic_patterns = [
             "verification",
             "verify",
             "code",
             "验证码",
             "confirm",
             "activation",
+            "welcome",
+            "注册",
+            "verify your",
         ]
         text = (
             f"{message.get('subject', '')} "
             f"{message.get('sender', {}).get('name', '')} "
             f"{message.get('sender', {}).get('address', '')}"
         ).lower()
-        return any(p.lower() in text for p in patterns)
+        return (
+            any(dp in text for dp in digitalplat_patterns)
+            or any(gp in text for gp in generic_patterns)
+        )
     
     def _extract_code_from_message(self, message: Dict[str, Any]) -> Optional[str]:
         """
