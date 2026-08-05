@@ -145,8 +145,13 @@ class MailTDService(EmailService):
             )
         return self.client
     
-    async def _get_domains(self) -> List[str]:
-        """Fetch available email domains from mail.td"""
+    async def _get_domains(self) -> List[dict]:
+        """Fetch available email domains from mail.td.
+        
+        Returns list of domain info dicts sorted by preference:
+        1. Default domain first (qabq.com)
+        2. Other non-pro domains
+        """
         client = await self._get_client()
         resp = await client.get("/api/domains")
         
@@ -155,16 +160,18 @@ class MailTDService(EmailService):
         
         data = resp.json()
         domains = data.get("domains", [])
-        active_domains = [d["domain"] for d in domains]
         
-        if not active_domains:
-            active_domains = [d["domain"] for d in domains]
-        
-        if not active_domains:
+        if not domains:
             raise EmailServiceError("No available domains from mail.td")
         
-        self.domains = active_domains
-        return active_domains
+        # Sort: default first, then non-pro domains, pro last
+        default_domains = [d for d in domains if d.get("default")]
+        free_domains = [d for d in domains if not d.get("default") and not d.get("pro_only")]
+        pro_domains = [d for d in domains if not d.get("default") and d.get("pro_only")]
+        
+        sorted_domains = default_domains + free_domains + pro_domains
+        self.domains = [d["domain"] for d in sorted_domains]
+        return sorted_domains
     
     def _generate_email_user(self, length: int = 6) -> str:
         """Generate random email username"""
@@ -246,11 +253,13 @@ class MailTDService(EmailService):
             logger.info("Creating temporary email using mail.td HTTP API")
             
             # Get available domains
-            domains = await self._get_domains()
-            domain = random.choice(domains)
+            domain_objects = await self._get_domains()
+            # Pick the preferred domain (default first: qabq.com)
+            domain_info = domain_objects[0]
+            domain = domain_info["domain"]
             
             # Generate random email and password
-            email_user = self._generate_email_user(6)
+            email_user = self._generate_email_user(10)
             email = f"{email_user}@{domain}"
             password = self._generate_password(8)
             
