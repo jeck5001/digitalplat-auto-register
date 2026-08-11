@@ -4,46 +4,54 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}DigitalPlat{% endblock %}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 <link rel="stylesheet" href="/static/css/app.css?v={{ asset_version() }}">
 {% block extra_head %}{% endblock %}
 </head>
 <body>
 
+<div class="ambient-glow-bg"></div>
+
 <div class="shell">
   <aside class="sidebar">
     <a class="brand" href="/">
-      <span class="brand-dot"></span>
-      DigitalPlat
+      <div class="brand-icon-box">
+        <i class="fa-solid fa-cube brand-icon"></i>
+      </div>
+      <span class="brand-text">DigitalPlat</span>
     </a>
 
     <nav>
       <div class="nav-section">
-        <div class="nav-label">注册</div>
+        <div class="nav-label">注册服务</div>
         <a class="nav-item{% if active_page == 'console' %} active{% endif %}" href="/">
-          <span class="nav-icon">&#9672;</span>
+          <span class="nav-icon"><i class="fa-solid fa-gauge-high"></i></span>
           控制台
         </a>
       </div>
 
       <div class="nav-section">
-        <div class="nav-label">域名</div>
+        <div class="nav-label">域名管理</div>
         <a class="nav-item{% if active_page == 'domain' %} active{% endif %}" href="/domain-automation">
-          <span class="nav-icon">&#9635;</span>
+          <span class="nav-icon"><i class="fa-solid fa-globe"></i></span>
           API 自动化
         </a>
       </div>
 
       <div class="nav-section">
-        <div class="nav-label">系统</div>
+        <div class="nav-label">资源池</div>
         <a class="nav-item{% if active_page == 'pool' %} active{% endif %}" href="/pool-dashboard">
-          <span class="nav-icon">&#9673;</span>
+          <span class="nav-icon"><i class="fa-solid fa-database"></i></span>
           账户池
         </a>
       </div>
     </nav>
 
     <div class="sidebar-footer">
-      v0.1.0
+      <span class="version-badge"><i class="fa-solid fa-shield-halved"></i> v0.1.0</span>
     </div>
   </aside>
 

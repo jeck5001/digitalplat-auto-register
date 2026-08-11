@@ -5,8 +5,8 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <h1 class="page-title">DigitalPlat 控制台</h1>
-    <div class="page-sub">批量注册与账号管理</div>
+    <h1 class="page-title"><i class="fa-solid fa-square-poll-vertical" style="color:var(--accent); margin-right:8px;"></i>DigitalPlat 控制台</h1>
+    <div class="page-sub">自动化批量注册与账号全生命周期管理</div>
   </div>
   <div class="page-meta">
     <div id="updated" class="conn">
@@ -17,38 +17,38 @@
 </div>
 
 <div class="tabs">
-  <button class="tab active" data-tab="dashboard" onclick="showTab('dashboard', this)">概览</button>
-  <button class="tab" data-tab="batch" onclick="showTab('batch', this)">批量注册</button>
-  <button class="tab" data-tab="accounts" onclick="showTab('accounts', this)">账号管理</button>
-  <button class="tab" data-tab="domains" onclick="showTab('domains', this)">账号域名注册</button>
-  <button class="tab" data-tab="history" onclick="showTab('history', this)">任务记录</button>
+  <button class="tab active" data-tab="dashboard" onclick="showTab('dashboard', this)"><i class="fa-solid fa-chart-pie"></i> 概览</button>
+  <button class="tab" data-tab="batch" onclick="showTab('batch', this)"><i class="fa-solid fa-bolt"></i> 批量注册</button>
+  <button class="tab" data-tab="accounts" onclick="showTab('accounts', this)"><i class="fa-solid fa-users"></i> 账号管理</button>
+  <button class="tab" data-tab="domains" onclick="showTab('domains', this)"><i class="fa-solid fa-network-wired"></i> 账号域名注册</button>
+  <button class="tab" data-tab="history" onclick="showTab('history', this)"><i class="fa-solid fa-clock-rotate-left"></i> 任务记录</button>
 </div>
 
 <!-- ======== Dashboard Tab ======== -->
 <div id="tab-dashboard" class="tab-content active">
   <div class="metrics">
     <div class="metric">
-      <div class="metric-label">总账号数</div>
+      <div class="metric-label"><span>总账号数</span> <i class="fa-solid fa-folder-closed" style="color:var(--ink-3);"></i></div>
       <div id="stat-total" class="metric-value">0</div>
     </div>
     <div class="metric">
-      <div class="metric-label">活跃</div>
+      <div class="metric-label"><span>活跃</span> <i class="fa-solid fa-circle-check" style="color:var(--ok);"></i></div>
       <div id="stat-active" class="metric-value ok">0</div>
     </div>
     <div class="metric">
-      <div class="metric-label">注册中</div>
+      <div class="metric-label"><span>注册中</span> <i class="fa-solid fa-spinner fa-spin" style="color:var(--info);"></i></div>
       <div id="stat-registering" class="metric-value info">0</div>
     </div>
     <div class="metric">
-      <div class="metric-label">待注册</div>
+      <div class="metric-label"><span>待注册</span> <i class="fa-solid fa-hourglass-half" style="color:var(--warn);"></i></div>
       <div id="stat-pending" class="metric-value warn">0</div>
     </div>
     <div class="metric">
-      <div class="metric-label">失败</div>
+      <div class="metric-label"><span>失败</span> <i class="fa-solid fa-circle-xmark" style="color:var(--err);"></i></div>
       <div id="stat-failed" class="metric-value err">0</div>
     </div>
     <div class="metric">
-      <div class="metric-label">运行中批量任务</div>
+      <div class="metric-label"><span>运行中批量任务</span> <i class="fa-solid fa-list-check" style="color:var(--accent);"></i></div>
       <div id="stat-batch" class="metric-value">0</div>
     </div>
   </div>

@@ -59,7 +59,7 @@
         <div class="form-row">
           <div>
             <label>Token 名称</label>
-            <input id="token-name" placeholder="例如：账号 A">
+            <input id="token-name" type="text" placeholder="例如：账号 A">
           </div>
           <div>
             <label>DigitalPlat API Token</label>
@@ -67,7 +67,7 @@
           </div>
         </div>
         <div class="actions" style="display:flex; gap: var(--s-3); align-items:center; margin-top: var(--s-4);">
-          <button class="btn btn-primary" onclick="addToken()">添加 Token</button>
+          <button class="btn btn-primary" onclick="addToken()"><i class="fa-solid fa-plus"></i> 添加 Token</button>
           <span class="hint">页面不会回显 Token 原文</span>
         </div>
         <div id="token-list" class="list" style="margin-top: var(--s-4)"></div>
@@ -88,7 +88,7 @@
         <div class="form-row">
           <div>
             <label>Cloudflare Account ID</label>
-            <input id="cf-account-id" placeholder="32 位 Account ID">
+            <input id="cf-account-id" type="text" placeholder="32 位 Account ID">
           </div>
           <div>
             <label>Cloudflare API Token</label>
@@ -96,8 +96,8 @@
           </div>
         </div>
         <div class="actions" style="display:flex; gap: var(--s-3); margin-top: var(--s-4);">
-          <button class="btn btn-primary" onclick="saveCloudflare()">保存配置</button>
-          <button class="btn btn-secondary" onclick="testCloudflare()">测试</button>
+          <button class="btn btn-primary" onclick="saveCloudflare()"><i class="fa-solid fa-floppy-disk"></i> 保存配置</button>
+          <button class="btn btn-secondary" onclick="testCloudflare()"><i class="fa-solid fa-vial"></i> 测试</button>
           <button class="btn btn-danger" onclick="deleteCloudflare()">删除</button>
         </div>
         <div id="cloudflare-state" class="hint" style="margin-top: var(--s-4)">尚未配置</div>
