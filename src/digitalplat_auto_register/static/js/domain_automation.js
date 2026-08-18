@@ -141,7 +141,7 @@
   /* =============== State refresh =============== */
   async function refresh() {
     try {
-      overview = await api("/api/domain-automation/overview");
+      overview = await api("/api/domain-automation");
       const conn = document.getElementById("connection");
       if (conn) {
         conn.className = "conn connected";
@@ -149,6 +149,7 @@
       }
       renderAll();
     } catch (e) {
+      console.error("refresh failed", e);
       const conn = document.getElementById("connection");
       if (conn) {
         conn.className = "conn";

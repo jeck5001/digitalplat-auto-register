@@ -1231,6 +1231,7 @@ def create_app(
     # ==================== Domain API Automation ====================
 
     @app.get("/api/domain-automation")
+    @app.get("/api/domain-automation/overview")
     async def domain_automation_overview() -> Dict[str, Any]:
         return domain_manager.overview()
 
