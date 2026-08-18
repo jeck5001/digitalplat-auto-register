@@ -273,24 +273,64 @@
     <section class="card">
       <div class="card-head">
         <div>
-          <div class="card-title">已注册域名</div>
+          <div class="card-title">已注册域名管理</div>
+          <div class="card-hint">支持搜索、筛选、CF状态检测、NS修改及批量删除</div>
         </div>
-        <div style="display:flex; gap: var(--s-3); align-items: center;">
-          <span class="hint" id="domain-count">0 个</span>
-          <button class="btn btn-secondary btn-sm" onclick="syncDomains()">从 DigitalPlat 同步</button>
-          <button class="btn btn-ghost btn-sm" onclick="hostAllCloudflare()">托管全部未激活域名</button>
+        <div style="display:flex; gap: var(--s-2); align-items: center; flex-wrap: wrap;">
+          <button class="btn btn-secondary btn-sm" onclick="syncDomains()"><i class="fa-solid fa-arrows-rotate"></i> 从 DigitalPlat 同步</button>
+          <button class="btn btn-ghost btn-sm" onclick="hostAllCloudflare()"><i class="fa-solid fa-cloud-arrow-up"></i> 托管全部未激活</button>
+          <button class="btn btn-danger btn-sm" onclick="bulkDeleteDomains()"><i class="fa-solid fa-trash"></i> 删除选中</button>
+          <button class="btn btn-ghost btn-sm" onclick="cleanupInvalidDomains()" title="清理失败或无效记录"><i class="fa-solid fa-broom"></i> 清理无效</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="toolbar" style="margin-bottom: var(--s-3);">
+          <input id="domain-search" type="text" class="search-box" placeholder="搜索域名、Token 或 NS…" oninput="filterDomains()">
+          <select id="domain-filter-status" onchange="filterDomains()">
+            <option value="">全部状态</option>
+            <option value="cf_active">Cloudflare 已激活</option>
+            <option value="cf_pending">Cloudflare 待验证</option>
+            <option value="unmanaged">未托管到 CF</option>
+            <option value="cf_failed">CF 托管失败</option>
+            <option value="renewal_issue">续期异常 / 失败</option>
+          </select>
+          <span class="hint" id="domain-count" style="margin-left: auto;">0 个</span>
         </div>
       </div>
       <div class="card-body flush">
         <div class="table-wrap">
           <table>
-            <thead><tr><th>域名</th><th>Token</th><th>Cloudflare</th><th>续期</th><th>注册时间</th><th style="width:110px"></th></tr></thead>
+            <thead>
+              <tr>
+                <th style="width:32px"><input type="checkbox" id="domain-select-all" onchange="toggleSelectAllDomains()"></th>
+                <th>域名</th>
+                <th>Token</th>
+                <th>Cloudflare</th>
+                <th>续期</th>
+                <th>注册时间</th>
+                <th style="width:170px">操作</th>
+              </tr>
+            </thead>
             <tbody id="domain-table"></tbody>
           </table>
         </div>
       </div>
     </section>
 
+  </div>
+</div>
+
+<!-- ======== Modal: Domain Detail & NS Edit ======== -->
+<div class="modal-overlay" id="domain-detail-modal">
+  <div class="modal modal-wide">
+    <div class="modal-head">
+      <h3 class="modal-title" id="domain-modal-title">域名详情</h3>
+      <div class="modal-sub" id="domain-modal-sub">查看域名详细配置与 Cloudflare 托管状态</div>
+    </div>
+    <div class="modal-body" id="domain-modal-content"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeDomainModal()">关闭</button>
+    </div>
   </div>
 </div>
 {% endblock %}

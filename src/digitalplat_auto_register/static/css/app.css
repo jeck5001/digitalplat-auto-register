@@ -638,7 +638,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .badge-warn    { background: var(--warn-soft); color: var(--warn); }
 .badge-info    { background: var(--info-soft); color: var(--info); }
 .badge-purple  { background: var(--purple-soft); color: var(--purple); }
-.badge-gray    { background: var(--bg-3); color: var(--ink-2); }
+.badge-gray, .badge-neutral    { background: var(--bg-3); color: var(--ink-2); }
 .badge-running::before,
 .badge-registering::before {
   animation: pulse 1.4s ease-in-out infinite;

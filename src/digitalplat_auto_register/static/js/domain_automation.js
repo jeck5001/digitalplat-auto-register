@@ -269,48 +269,128 @@
 
   /* =============== Domains table =============== */
   function cloudflareDetail(d) {
-    const steps = (d.cloudflare_steps || []).map((s) => escapeHtml(s.label) + "：" + escapeHtml(s.message)).join("<br>");
-    return (
-      statusBadge(d.cloudflare_status || "unmanaged") +
-      (steps ? '<div class="hint" style="margin-top:5px">' + steps + "</div>" : "") +
-      (d.cloudflare_error ? '<div style="color:var(--err);font-size:11px;margin-top:4px">' + escapeHtml(d.cloudflare_error) + "</div>" : "")
-    );
+    const status = d.cloudflare_status || "unmanaged";
+    let badge = statusBadge(status);
+    if (status === "active") {
+      badge = '<span class="badge badge-ok"><i class="fa-solid fa-circle-check"></i> CF 已激活</span>';
+    } else if (status === "pending") {
+      badge = '<span class="badge badge-warn"><i class="fa-solid fa-clock"></i> CF 待验证</span>';
+    } else if (status === "failed") {
+      badge = '<span class="badge badge-err"><i class="fa-solid fa-circle-xmark"></i> CF 失败</span>';
+    } else {
+      badge = '<span class="badge badge-neutral"><i class="fa-solid fa-circle-minus"></i> 未托管</span>';
+    }
+
+    const zoneId = d.cloudflare_zone_id ? '<div class="hint mono" style="font-size:10px;margin-top:2px;">Zone: ' + escapeHtml(d.cloudflare_zone_id.slice(0, 10)) + '…</div>' : '';
+    const errorText = d.cloudflare_error ? '<div style="color:var(--err);font-size:10px;margin-top:2px">' + escapeHtml(d.cloudflare_error) + '</div>' : '';
+
+    return badge + zoneId + errorText;
   }
 
   function renewalDetail(d) {
     const status = d.renewal_status || "untested";
+    const days = d.renewal_days_remaining;
+    let daysBadge = "";
+    if (days != null) {
+      if (days <= 30) {
+        daysBadge = ' <span style="color:var(--err);font-weight:600">(' + days + '天)</span>';
+      } else if (days <= 90) {
+        daysBadge = ' <span style="color:var(--warn)">(' + days + '天)</span>';
+      } else {
+        daysBadge = ' <span style="color:var(--ink-3)">(' + days + '天)</span>';
+      }
+    }
+
     return (
-      statusBadge(status) +
-      '<div class="hint" style="margin-top:5px">到期：' + escapeHtml(d.expiry_date || "未知") +
-      (d.renewal_days_remaining == null ? "" : " · 剩余 " + d.renewal_days_remaining + " 天") +
-      (d.renewed_at ? " · 上次续期 " + formatTime(d.renewed_at) : "") +
-      "</div>" +
-      (d.renewal_error ? '<div style="color:var(--err);font-size:11px;margin-top:4px">' + escapeHtml(d.renewal_error) + "</div>" : "")
+      '<div style="font-size:12px;color:var(--ink-1);">' + escapeHtml(d.expiry_date || "未知") + daysBadge + '</div>' +
+      '<div class="hint" style="margin-top:2px;font-size:10px;">状态: ' + statusBadge(status) +
+      (d.renewed_at ? ' · ' + formatTime(d.renewed_at) : '') +
+      '</div>' +
+      (d.renewal_error ? '<div style="color:var(--err);font-size:10px;margin-top:2px">' + escapeHtml(d.renewal_error) + '</div>' : '')
     );
   }
 
+  function getFilteredDomains() {
+    const query = (document.getElementById("domain-search") ? document.getElementById("domain-search").value : "").trim().toLowerCase();
+    const filter = document.getElementById("domain-filter-status") ? document.getElementById("domain-filter-status").value : "";
+    let list = overview.domains || [];
+
+    if (query) {
+      list = list.filter((d) => {
+        const domain = (d.domain || "").toLowerCase();
+        const token = (d.token_name || "").toLowerCase();
+        const ns = ((d.nameservers || []).join(" ")).toLowerCase();
+        return domain.includes(query) || token.includes(query) || ns.includes(query);
+      });
+    }
+
+    if (filter === "cf_active") {
+      list = list.filter((d) => d.cloudflare_status === "active");
+    } else if (filter === "cf_pending") {
+      list = list.filter((d) => d.cloudflare_status === "pending");
+    } else if (filter === "unmanaged") {
+      list = list.filter((d) => !d.cloudflare_status || d.cloudflare_status === "unmanaged");
+    } else if (filter === "cf_failed") {
+      list = list.filter((d) => d.cloudflare_status === "failed");
+    } else if (filter === "renewal_issue") {
+      list = list.filter((d) => d.renewal_status === "failed" || (d.renewal_days_remaining != null && d.renewal_days_remaining <= 30));
+    }
+
+    return list;
+  }
+
+  function filterDomains() {
+    renderDomains();
+  }
+
+  function toggleSelectAllDomains() {
+    const checked = document.getElementById("domain-select-all") ? document.getElementById("domain-select-all").checked : false;
+    document.querySelectorAll(".domain-checkbox").forEach((cb) => {
+      cb.checked = checked;
+    });
+  }
+
+  function getSelectedDomains() {
+    return Array.from(document.querySelectorAll(".domain-checkbox:checked")).map((cb) => cb.value);
+  }
+
   function renderDomains() {
-    document.getElementById("domain-count").textContent = (overview.domains || []).length + " 个";
+    const allDomains = overview.domains || [];
+    const filtered = getFilteredDomains();
+    const countEl = document.getElementById("domain-count");
+    if (countEl) {
+      countEl.textContent = "显示 " + filtered.length + " / 共 " + allDomains.length + " 个";
+    }
+
     const tbody = document.getElementById("domain-table");
-    const domains = overview.domains || [];
-    if (!domains.length) {
+    if (!tbody) return;
+
+    if (!filtered.length) {
       tbody.innerHTML =
-        '<tr><td colspan="6"><div class="empty"><div class="empty-icon">◈</div><div class="empty-title">暂无成功注册的域名</div></div></td></tr>';
+        '<tr><td colspan="7"><div class="empty"><div class="empty-icon">◈</div><div class="empty-title">无匹配的域名</div><div class="empty-hint">可尝试清除搜索关键词或更换筛选状态</div></div></td></tr>';
       return;
     }
-    tbody.innerHTML = domains
+
+    tbody.innerHTML = filtered
       .map(
         (d) =>
           "<tr>" +
-          '<td><strong style="color:var(--ink-1)">' + escapeHtml(d.domain) + "</strong>" +
-          '<div class="hint mono" style="margin-top:4px;font-size:10px">' + ((d.nameservers || []).map(escapeHtml).join(" · ") || "尚未设置 NS") + "</div></td>" +
-          '<td><div class="row-title">' + escapeHtml(d.token_name) + '</div><div class="hint">' + escapeHtml(d.slot_type) + "</div></td>" +
+          '<td><input type="checkbox" class="domain-checkbox" value="' + escapeHtml(d.domain) + '"></td>' +
+          '<td><strong style="color:var(--ink-1);font-size:13px;">' + escapeHtml(d.domain) + "</strong>" +
+          '<div class="hint mono" style="margin-top:3px;font-size:11px">' + ((d.nameservers || []).map(escapeHtml).join(" · ") || "尚未设置 NS") + "</div></td>" +
+          '<td><div class="row-title" style="font-size:12px;">' + escapeHtml(d.token_name || "-") + '</div><div class="hint" style="font-size:10px;">' + escapeHtml(d.slot_type || "-") + "</div></td>" +
           "<td>" + cloudflareDetail(d) + "</td>" +
           "<td>" + renewalDetail(d) + "</td>" +
           '<td class="mono" style="font-size:11px">' + escapeHtml(formatTime(d.registered_at)) + "</td>" +
-          '<td><button class="btn btn-secondary btn-sm" onclick="hostCloudflare(\'' + escapeHtml(d.domain) + "')\">" +
-          (d.cloudflare_status ? "重试 / 刷新" : "托管到 Cloudflare") +
-          "</button></td>" +
+          '<td>' +
+          '<div style="display:flex; gap:4px; flex-wrap:wrap;">' +
+          '<button class="btn btn-ghost btn-sm" onclick="viewDomainDetail(\'' + escapeHtml(d.domain) + '\')" title="查看详情与编辑NS">详情</button>' +
+          (d.cloudflare_status === "active"
+            ? '<button class="btn btn-secondary btn-sm" onclick="refreshDomain(\'' + escapeHtml(d.domain) + '\')" title="刷新CF与DP真实状态">检测</button>'
+            : '<button class="btn btn-secondary btn-sm" onclick="hostCloudflare(\'' + escapeHtml(d.domain) + '\')" title="托管到 Cloudflare">托管CF</button>') +
+          '<button class="btn btn-danger btn-sm" onclick="deleteDomain(\'' + escapeHtml(d.domain) + '\')" title="删除域名记录">删除</button>' +
+          '</div>' +
+          "</td>" +
           "</tr>"
       )
       .join("");
@@ -435,18 +515,101 @@
 
   async function hostCloudflare(domain) {
     try {
-      showToast("正在配置 " + domain + "…", "info");
+      showToast("正在配置 " + domain + " 到 Cloudflare…", "info");
       await api("/api/domain-automation/domains/" + encodeURIComponent(domain) + "/cloudflare", { method: "POST" });
+      showToast(domain + " 已更新 Cloudflare 托管");
       await refresh();
     } catch (e) {
       showToast(e.message, "error");
     }
   }
 
+  async function refreshDomain(domain) {
+    try {
+      showToast("正在检测 " + domain + " 真实状态…", "info");
+      await api("/api/domain-automation/domains/" + encodeURIComponent(domain) + "/refresh", { method: "POST" });
+      showToast(domain + " 状态已更新");
+      await refresh();
+    } catch (e) {
+      showToast("检测失败: " + e.message, "error");
+    }
+  }
+
+  async function deleteDomain(domain) {
+    const hasCf = overview.cloudflare && overview.cloudflare.enabled;
+    let deleteCf = false;
+    if (hasCf) {
+      const choice = window.confirm("确认删除域名 " + domain + "？\n\n点击【确定】同时从 Cloudflare 移除 Zone；\n点击【取消】仅从本地记录删除（或取消操作）。");
+      if (choice) {
+        deleteCf = true;
+      } else {
+        if (!window.confirm("是否仅从本地记录删除域名 " + domain + "（保留 CF Zone）？")) return;
+        deleteCf = false;
+      }
+    } else {
+      if (!window.confirm("确认删除域名 " + domain + " 记录？")) return;
+    }
+
+    try {
+      await api("/api/domain-automation/domains/" + encodeURIComponent(domain) + "?delete_cf_zone=" + deleteCf, {
+        method: "DELETE",
+      });
+      showToast("域名 " + domain + " 已删除" + (deleteCf ? "（已联动移除 CF Zone）" : ""));
+      await refresh();
+    } catch (e) {
+      showToast("删除失败: " + e.message, "error");
+    }
+  }
+
+  async function bulkDeleteDomains() {
+    const selected = getSelectedDomains();
+    if (!selected.length) {
+      showToast("请先在表格中勾选要删除的域名", "warn");
+      return;
+    }
+
+    const hasCf = overview.cloudflare && overview.cloudflare.enabled;
+    let deleteCf = false;
+    if (hasCf) {
+      const choice = window.confirm("确认批量删除选中的 " + selected.length + " 个域名？\n\n点击【确定】同时从 Cloudflare 移除对应 Zone；\n点击【取消】仅从本地记录删除。");
+      if (choice) {
+        deleteCf = true;
+      } else {
+        if (!window.confirm("是否仅从本地记录删除选中的 " + selected.length + " 个域名（保留 CF Zone）？")) return;
+        deleteCf = false;
+      }
+    } else {
+      if (!window.confirm("确认批量删除选中的 " + selected.length + " 个域名？")) return;
+    }
+
+    try {
+      const res = await api("/api/domain-automation/domains/bulk-delete", {
+        method: "POST",
+        body: { domains: selected, delete_cf_zone: deleteCf },
+      });
+      showToast("已删除 " + res.deleted_count + " 个域名" + (res.cloudflare_zones_deleted ? "（移除 " + res.cloudflare_zones_deleted + " 个 CF Zone）" : ""));
+      await refresh();
+    } catch (e) {
+      showToast("批量删除失败: " + e.message, "error");
+    }
+  }
+
+  async function cleanupInvalidDomains() {
+    if (!window.confirm("确认一键清理所有失败或无效的域名记录？")) return;
+    try {
+      const res = await api("/api/domain-automation/domains/cleanup", { method: "POST" });
+      showToast("已清理 " + res.cleaned_count + " 条无效记录");
+      await refresh();
+    } catch (e) {
+      showToast("清理失败: " + e.message, "error");
+    }
+  }
+
   async function syncDomains() {
     try {
+      showToast("正在从 DigitalPlat 同步域名…", "info");
       const result = await api("/api/domain-automation/domains/sync", { method: "POST" });
-      showToast("同步完成，新增 " + result.synced + " 个域名");
+      showToast("同步完成，新增 " + result.synced + " 个域名，现有 " + result.total + " 个");
       await refresh();
     } catch (e) {
       showToast(e.message, "error");
@@ -456,10 +619,10 @@
   async function hostAllCloudflare() {
     const domains = (overview.domains || []).filter((d) => d.cloudflare_status !== "active");
     if (!domains.length) {
-      showToast("没有待托管域名");
+      showToast("所有域名已在 Cloudflare 处于 Active 状态");
       return;
     }
-    if (!window.confirm("确认依次托管 " + domains.length + " 个域名到 Cloudflare？")) return;
+    if (!window.confirm("确认依次托管 " + domains.length + " 个未激活域名到 Cloudflare？")) return;
     for (const d of domains) {
       showToast("正在配置 " + d.domain + "…", "info");
       try {
@@ -469,6 +632,96 @@
       }
     }
     await refresh();
+  }
+
+  /* =============== Domain Detail Modal =============== */
+  function viewDomainDetail(domainName) {
+    const domain = (overview.domains || []).find((d) => d.domain === domainName);
+    if (!domain) {
+      showToast("未找到该域名记录", "error");
+      return;
+    }
+
+    document.getElementById("domain-modal-title").textContent = domain.domain;
+    document.getElementById("domain-modal-sub").textContent = "所属 Token: " + (domain.token_name || "-") + " · 容量类型: " + (domain.slot_type || "-");
+
+    const nsList = domain.nameservers || [];
+    const ns1 = nsList[0] || "ns1.cloudflare.com";
+    const ns2 = nsList[1] || "ns2.cloudflare.com";
+
+    const steps = (domain.cloudflare_steps || []).map((s) => {
+      const icon = s.status === "success" ? "✓" : s.status === "failed" ? "!" : "·";
+      return '<div style="font-size:12px; margin-bottom:4px;"><span class="step-dot" style="display:inline-block;width:16px;height:16px;line-height:16px;text-align:center;border-radius:50%;background:var(--bg-3);margin-right:6px;font-size:10px;">' + icon + '</span><strong>' + escapeHtml(s.label) + ':</strong> ' + escapeHtml(s.message) + '</div>';
+    }).join("");
+
+    let html =
+      '<div class="batch-config-box">' +
+      '<div class="batch-config-box-title"><i class="fa-solid fa-circle-info" style="color:var(--accent)"></i> 域名基础状态</div>' +
+      '<div class="batch-config-grid">' +
+      '<div class="config-item"><div class="config-item-label">注册状态</div><div class="config-item-value">' + statusBadge(domain.status || "ok") + '</div></div>' +
+      '<div class="config-item"><div class="config-item-label">注册时间</div><div class="config-item-value mono">' + escapeHtml(formatTime(domain.registered_at)) + '</div></div>' +
+      '<div class="config-item"><div class="config-item-label">到期时间</div><div class="config-item-value mono">' + escapeHtml(domain.expiry_date || "未知") + (domain.renewal_days_remaining != null ? ' (剩余 ' + domain.renewal_days_remaining + ' 天)' : '') + '</div></div>' +
+      '<div class="config-item"><div class="config-item-label">续期状态</div><div class="config-item-value">' + statusBadge(domain.renewal_status || "untested") + '</div></div>' +
+      '</div>' +
+      '</div>';
+
+    html +=
+      '<div class="batch-config-box">' +
+      '<div class="batch-config-box-title"><i class="fa-solid fa-cloud" style="color:var(--info)"></i> Cloudflare 托管详情</div>' +
+      '<div class="batch-config-grid">' +
+      '<div class="config-item"><div class="config-item-label">托管状态</div><div class="config-item-value">' + statusBadge(domain.cloudflare_status || "unmanaged") + '</div></div>' +
+      '<div class="config-item"><div class="config-item-label">Zone ID</div><div class="config-item-value mono">' + escapeHtml(domain.cloudflare_zone_id || "尚未创建") + '</div></div>' +
+      '<div class="config-item"><div class="config-item-label">CF Nameservers</div><div class="config-item-value mono">' + escapeHtml((domain.cloudflare_nameservers || []).join(" · ") || "-") + '</div></div>' +
+      '<div class="config-item"><div class="config-item-label">最后检测时间</div><div class="config-item-value mono">' + escapeHtml(formatTime(domain.cloudflare_checked_at) || "-") + '</div></div>' +
+      '</div>' +
+      (steps ? '<div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--line-1);">' + steps + '</div>' : '') +
+      (domain.cloudflare_error ? '<div class="step-error" style="margin-top:10px;"><strong>CF 错误：</strong>' + escapeHtml(domain.cloudflare_error) + '</div>' : '') +
+      '</div>';
+
+    html +=
+      '<div class="batch-config-box">' +
+      '<div class="batch-config-box-title"><i class="fa-solid fa-server" style="color:var(--accent)"></i> 修改 Nameservers 解析服务器</div>' +
+      '<div class="form-row" style="margin-bottom:0;">' +
+      '<div><label>Nameserver 1</label><input type="text" id="edit-domain-ns1" value="' + escapeHtml(ns1) + '"></div>' +
+      '<div><label>Nameserver 2</label><input type="text" id="edit-domain-ns2" value="' + escapeHtml(ns2) + '"></div>' +
+      '</div>' +
+      '<div style="display:flex; gap: var(--s-3); align-items:center; margin-top:10px;">' +
+      '<button class="btn btn-primary btn-sm" onclick="saveDomainNameservers(\'' + escapeHtml(domain.domain) + '\')"><i class="fa-solid fa-check"></i> 更新 Nameservers</button>' +
+      '<button class="btn btn-secondary btn-sm" onclick="refreshDomain(\'' + escapeHtml(domain.domain) + '\')"><i class="fa-solid fa-arrows-rotate"></i> 检测真实状态</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="hostCloudflare(\'' + escapeHtml(domain.domain) + '\')"><i class="fa-solid fa-cloud-arrow-up"></i> 重新托管到 CF</button>' +
+      '<button class="btn btn-danger btn-sm" onclick="closeDomainModal(); deleteDomain(\'' + escapeHtml(domain.domain) + '\')"><i class="fa-solid fa-trash"></i> 删除此域名</button>' +
+      '</div>' +
+      '</div>';
+
+    document.getElementById("domain-modal-content").innerHTML = html;
+    document.getElementById("domain-detail-modal").classList.add("active");
+  }
+
+  async function saveDomainNameservers(domain) {
+    const ns1 = document.getElementById("edit-domain-ns1").value.trim();
+    const ns2 = document.getElementById("edit-domain-ns2").value.trim();
+    if (!ns1 || !ns2) {
+      showToast("请填写两个有效的 Nameservers", "warn");
+      return;
+    }
+
+    try {
+      showToast("正在更新 Nameservers…", "info");
+      await api("/api/domain-automation/domains/" + encodeURIComponent(domain) + "/nameservers", {
+        method: "PATCH",
+        body: { nameservers: [ns1, ns2] },
+      });
+      showToast("Nameservers 更新成功");
+      await refresh();
+      viewDomainDetail(domain);
+    } catch (e) {
+      showToast("更新失败: " + e.message, "error");
+    }
+  }
+
+  function closeDomainModal() {
+    const modal = document.getElementById("domain-detail-modal");
+    if (modal) modal.classList.remove("active");
   }
 
   async function addSubscription() {
@@ -542,8 +795,17 @@
     saveRenewal,
     runRenewal,
     hostCloudflare,
+    refreshDomain,
+    deleteDomain,
+    bulkDeleteDomains,
+    cleanupInvalidDomains,
     syncDomains,
     hostAllCloudflare,
+    filterDomains,
+    toggleSelectAllDomains,
+    viewDomainDetail,
+    saveDomainNameservers,
+    closeDomainModal,
     addSubscription,
     deleteSubscription,
     startJob,

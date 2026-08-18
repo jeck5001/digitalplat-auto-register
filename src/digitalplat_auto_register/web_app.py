@@ -1307,6 +1307,48 @@ def create_app(
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
+    @app.delete("/api/domain-automation/domains/{domain}")
+    async def delete_domain_record(domain: str, delete_cf_zone: bool = False) -> Dict[str, Any]:
+        try:
+            return await domain_manager.delete_domain(domain, delete_cf_zone=delete_cf_zone)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Domain record not found") from error
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+
+    @app.post("/api/domain-automation/domains/bulk-delete")
+    async def bulk_delete_domain_records(request: Dict[str, Any]) -> Dict[str, Any]:
+        domains = request.get("domains", [])
+        delete_cf_zone = bool(request.get("delete_cf_zone", False))
+        if not isinstance(domains, list) or not domains:
+            raise HTTPException(status_code=400, detail="domains list is required")
+        return await domain_manager.bulk_delete_domains(domains, delete_cf_zone=delete_cf_zone)
+
+    @app.post("/api/domain-automation/domains/cleanup")
+    async def cleanup_invalid_domain_records() -> Dict[str, Any]:
+        return await domain_manager.cleanup_invalid_domains()
+
+    @app.post("/api/domain-automation/domains/{domain}/refresh")
+    async def refresh_domain_status(domain: str) -> Dict[str, Any]:
+        try:
+            return await domain_manager.refresh_domain_status(domain)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+
+    @app.patch("/api/domain-automation/domains/{domain}/nameservers")
+    async def update_domain_nameservers(domain: str, request: Dict[str, Any]) -> Dict[str, Any]:
+        nameservers = request.get("nameservers", [])
+        if not isinstance(nameservers, list) or len(nameservers) < 2:
+            raise HTTPException(status_code=400, detail="At least two nameservers are required")
+        try:
+            return await domain_manager.update_domain_nameservers(domain, nameservers)
+        except (ValueError, DigitalPlatAPIError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+
     @app.post("/api/domain-automation/domains/sync")
     async def sync_digitalplat_domains() -> Dict[str, Any]:
         return await domain_manager.sync_domains()

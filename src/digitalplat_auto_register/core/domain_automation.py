@@ -208,6 +208,12 @@ class CloudflareClient:
             raise CloudflareAPIError("Cloudflare zone status returned an unexpected shape")
         return result
 
+    def delete_zone(self, zone_id: str) -> Dict[str, Any]:
+        result = self._request("DELETE", f"/zones/{quote(zone_id, safe='')}")
+        if not isinstance(result, dict):
+            raise CloudflareAPIError("Cloudflare zone deletion returned an unexpected shape")
+        return result
+
 
 class DigitalPlatDomainClient:
     """Small client for the documented DigitalPlat Domains API."""
@@ -529,7 +535,41 @@ class DomainAutomationStore:
                 job.error = "Task interrupted by service restart"
                 job.finished_at = _timestamp()
             self.jobs[job.id] = job
-        self.domains = [item for item in payload.get("domains", []) if isinstance(item, dict)]
+        # Deduplicate and merge domain records
+        unique_domains: Dict[str, Dict[str, Any]] = {}
+        for item in payload.get("domains", []):
+            if isinstance(item, dict) and item.get("domain"):
+                domain_key = str(item["domain"]).strip().lower().rstrip(".")
+                if domain_key in unique_domains:
+                    unique_domains[domain_key].update(item)
+                else:
+                    unique_domains[domain_key] = item
+        self.domains = list(unique_domains.values())
+
+    def delete_domain(self, domain: str) -> Optional[Dict[str, Any]]:
+        normalized = str(domain or "").strip().lower().rstrip(".")
+        found = None
+        remaining = []
+        for item in self.domains:
+            if str(item.get("domain", "")).strip().lower().rstrip(".") == normalized:
+                found = item
+            else:
+                remaining.append(item)
+        self.domains = remaining
+        return found
+
+    def bulk_delete_domains(self, domains: List[str]) -> List[Dict[str, Any]]:
+        targets = {str(d).strip().lower().rstrip(".") for d in domains if d}
+        deleted = []
+        remaining = []
+        for item in self.domains:
+            domain_name = str(item.get("domain", "")).strip().lower().rstrip(".")
+            if domain_name in targets:
+                deleted.append(item)
+            else:
+                remaining.append(item)
+        self.domains = remaining
+        return deleted
 
     def _persist(self) -> None:
         self.data_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1282,13 +1322,158 @@ class DomainAutomationManager:
             job.finished_at = _timestamp()
             await self.store.save()
 
+    async def delete_domain(self, domain: str, delete_cf_zone: bool = False) -> Dict[str, Any]:
+        normalized = str(domain or "").strip().lower().rstrip(".")
+        deleted = self.store.delete_domain(normalized)
+        if not deleted:
+            raise KeyError(domain)
+        cf_deleted = False
+        cf_error = None
+        if delete_cf_zone and self.store.cloudflare:
+            zone_id = deleted.get("cloudflare_zone_id")
+            try:
+                cloudflare = self._cloudflare_client()
+                if not zone_id:
+                    zone = await _run_sync(cloudflare.find_zone, normalized)
+                    if zone and zone.get("id"):
+                        zone_id = str(zone["id"])
+                if zone_id:
+                    await _run_sync(cloudflare.delete_zone, zone_id)
+                    cf_deleted = True
+            except Exception as error:
+                cf_error = _safe_error(error)
+        await self.store.save()
+        return {
+            "deleted": normalized,
+            "cloudflare_zone_deleted": cf_deleted,
+            "cloudflare_error": cf_error,
+        }
+
+    async def bulk_delete_domains(self, domains: List[str], delete_cf_zone: bool = False) -> Dict[str, Any]:
+        deleted_records = self.store.bulk_delete_domains(domains)
+        cf_deleted_count = 0
+        cf_errors = []
+        if delete_cf_zone and self.store.cloudflare:
+            try:
+                cloudflare = self._cloudflare_client()
+                for rec in deleted_records:
+                    domain_name = str(rec.get("domain", "")).strip().lower().rstrip(".")
+                    zone_id = rec.get("cloudflare_zone_id")
+                    try:
+                        if not zone_id:
+                            zone = await _run_sync(cloudflare.find_zone, domain_name)
+                            if zone and zone.get("id"):
+                                zone_id = str(zone["id"])
+                        if zone_id:
+                            await _run_sync(cloudflare.delete_zone, zone_id)
+                            cf_deleted_count += 1
+                    except Exception as error:
+                        cf_errors.append({"domain": domain_name, "error": str(error)})
+            except Exception as error:
+                cf_errors.append({"error": str(error)})
+        await self.store.save()
+        return {
+            "deleted_count": len(deleted_records),
+            "cloudflare_zones_deleted": cf_deleted_count,
+            "cloudflare_errors": cf_errors,
+        }
+
+    async def cleanup_invalid_domains(self) -> Dict[str, Any]:
+        invalid_domains = []
+        for item in self.store.domains:
+            status = str(item.get("status", "")).lower()
+            if status in {"failed", "invalid"} or not item.get("domain"):
+                invalid_domains.append(item.get("domain"))
+        if invalid_domains:
+            self.store.bulk_delete_domains(invalid_domains)
+            await self.store.save()
+        return {
+            "cleaned_count": len(invalid_domains),
+            "cleaned_domains": invalid_domains,
+        }
+
+    async def refresh_domain_status(self, domain: str) -> Dict[str, Any]:
+        record = self._domain_record(domain)
+        token_id = str(record.get("token_id", ""))
+        token = self.store.tokens.get(token_id)
+        dp_updated = False
+        dp_error = None
+        if token and token.enabled:
+            try:
+                client = self.client_factory(token.token, self.api_base)
+                detail = await _run_sync(client.get_domain, record["domain"])
+                if isinstance(detail, dict):
+                    record["status"] = detail.get("status", record.get("status", "ok"))
+                    if detail.get("nameservers"):
+                        record["nameservers"] = [str(ns).lower().rstrip(".") for ns in detail.get("nameservers", [])]
+                    record["expiry_date"] = next(
+                        (detail.get(key) for key in ("expiry_date", "expires_at", "expiryDate", "expiresAt", "expiration_date") if detail.get(key)),
+                        record.get("expiry_date"),
+                    )
+                    record["renewal_days_remaining"] = self._days_remaining(detail)
+                    dp_updated = True
+            except DigitalPlatAPIError as error:
+                dp_error = _safe_error(error)
+
+        cf_updated = False
+        cf_error = None
+        if self.store.cloudflare and self.store.cloudflare.enabled:
+            try:
+                cloudflare = self._cloudflare_client()
+                zone_id = record.get("cloudflare_zone_id")
+                if not zone_id:
+                    zone = await _run_sync(cloudflare.find_zone, record["domain"])
+                    if zone:
+                        zone_id = str(zone.get("id", ""))
+                        record["cloudflare_zone_id"] = zone_id
+                        record["cloudflare_nameservers"] = [
+                            str(item).strip().lower().rstrip(".")
+                            for item in zone.get("name_servers", [])
+                            if str(item).strip()
+                        ]
+                if zone_id:
+                    latest_zone = await _run_sync(cloudflare.get_zone, zone_id)
+                    zone_status = str(latest_zone.get("status", "pending")).lower()
+                    record["cloudflare_status"] = "active" if zone_status == "active" else zone_status
+                    record["cloudflare_checked_at"] = _timestamp()
+                    cf_updated = True
+                else:
+                    record["cloudflare_status"] = "unmanaged"
+            except Exception as error:
+                cf_error = _safe_error(error)
+                record["cloudflare_error"] = cf_error
+
+        await self.store.save()
+        return {
+            "record": record,
+            "digitalplat_updated": dp_updated,
+            "digitalplat_error": dp_error,
+            "cloudflare_updated": cf_updated,
+            "cloudflare_error": cf_error,
+        }
+
+    async def update_domain_nameservers(self, domain: str, nameservers: List[str]) -> Dict[str, Any]:
+        record = self._domain_record(domain)
+        token_id = str(record.get("token_id", ""))
+        token = self.store.tokens.get(token_id)
+        if not token:
+            raise ValueError("API Token for this domain is missing")
+        cleaned_ns = [str(ns).strip().lower().rstrip(".") for ns in nameservers if str(ns).strip()]
+        if len(cleaned_ns) < 2 or any(not HOSTNAME_PATTERN.fullmatch(ns) for ns in cleaned_ns):
+            raise ValueError("At least two valid hostname nameservers are required")
+        client = self.client_factory(token.token, self.api_base)
+        await _run_sync(client.update_nameservers, record["domain"], cleaned_ns)
+        record["nameservers"] = cleaned_ns
+        await self.store.save()
+        return record
+
     def overview(self) -> Dict[str, Any]:
         jobs = sorted(self.store.jobs.values(), key=lambda item: item.created_at, reverse=True)
         return {
             "tokens": [item.safe_dict() for item in self.store.tokens.values()],
             "subscriptions": [item.to_dict() for item in self.store.subscriptions.values()],
             "jobs": [item.to_dict() for item in jobs[:50]],
-            "domains": list(reversed(self.store.domains[-200:])),
+            "domains": list(reversed(self.store.domains)),
             "cloudflare": self.store.cloudflare.safe_dict() if self.store.cloudflare else None,
             "renewal": self.store.renewal.safe_dict(),
             "stats": {
@@ -1299,6 +1484,13 @@ class DomainAutomationManager:
                 "registered_domains": len(self.store.domains),
                 "cloudflare_active": sum(
                     item.get("cloudflare_status") == "active" for item in self.store.domains
+                ),
+                "cloudflare_pending": sum(
+                    item.get("cloudflare_status") == "pending" for item in self.store.domains
+                ),
+                "unmanaged": sum(
+                    not item.get("cloudflare_status") or item.get("cloudflare_status") == "unmanaged"
+                    for item in self.store.domains
                 ),
             },
         }
