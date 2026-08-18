@@ -110,7 +110,7 @@
       renewed: ["badge-ok", "已续期"],
       running: ["badge-running", "进行中"],
       registering: ["badge-registering", "注册中"],
-      pending: ["badge-pending", "待生效"],
+      pending: ["badge-warn", "待生效"],
       untested: ["badge-gray", "未测试"],
       unmanaged: ["badge-gray", "未托管"],
       failed: ["badge-err", "失败"],
@@ -142,24 +142,30 @@
   async function refresh() {
     try {
       overview = await api("/api/domain-automation/overview");
-      document.getElementById("connection").className = "conn connected";
-      document.getElementById("connection").innerHTML = '<span class="conn-dot"></span><span>已连接</span>';
+      const conn = document.getElementById("connection");
+      if (conn) {
+        conn.className = "conn connected";
+        conn.innerHTML = '<span class="conn-dot"></span><span>已连接</span>';
+      }
       renderAll();
-    } catch {
-      document.getElementById("connection").className = "conn";
-      document.getElementById("connection").innerHTML = '<span class="conn-dot"></span><span>连接失败</span>';
+    } catch (e) {
+      const conn = document.getElementById("connection");
+      if (conn) {
+        conn.className = "conn";
+        conn.innerHTML = '<span class="conn-dot"></span><span>连接失败</span>';
+      }
     }
   }
 
   function renderAll() {
-    renderStats();
-    renderTokens();
-    renderSubscriptions();
-    renderJobs();
-    renderDomains();
-    renderCloudflare();
-    renderRenewal();
-    updateTokenFilterOptions();
+    try { renderStats(); } catch (e) { console.error("renderStats error", e); }
+    try { renderTokens(); } catch (e) { console.error("renderTokens error", e); }
+    try { renderSubscriptions(); } catch (e) { console.error("renderSubscriptions error", e); }
+    try { renderJobs(); } catch (e) { console.error("renderJobs error", e); }
+    try { renderDomains(); } catch (e) { console.error("renderDomains error", e); }
+    try { renderCloudflare(); } catch (e) { console.error("renderCloudflare error", e); }
+    try { renderRenewal(); } catch (e) { console.error("renderRenewal error", e); }
+    try { updateTokenFilterOptions(); } catch (e) { console.error("updateTokenFilterOptions error", e); }
   }
 
   function renderStats() {
