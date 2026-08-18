@@ -1,288 +1,379 @@
-/* ============================================================
-   domain_automation.js — /domain-automation page JS
-   Depends on `DP` from api.js. Polls /api/domain-automation every 3s.
-   ============================================================ */
-
 (function () {
   "use strict";
 
-  const { api, escapeHtml, statusBadge, formatTime, showToast, setConnected } = window.DP;
-
-  /* Cached overview state */
   let overview = {
     tokens: [],
     subscriptions: [],
     jobs: [],
     domains: [],
     cloudflare: null,
-    renewal: null,
+    renewal: {},
     stats: {},
   };
 
-  /* Step labels for domain registration pipeline */
-  const ATTEMPT_STEP_LABELS = {
-    candidate_generation: "生成候选域名",
-    token_assignment: "分配 API Token",
-    registration_request: "提交注册请求",
-    registration_verification: "确认注册结果",
-  };
-  const ATTEMPT_STEP_ORDER = [
-    "candidate_generation",
-    "token_assignment",
-    "registration_request",
-    "registration_verification",
-  ];
+  let activeTab = "domains";
 
-  /* =============== Refresh loop =============== */
-  async function refresh() {
+  /* =============== Utilities =============== */
+  function escapeHtml(str) {
+    if (str == null) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  function formatTime(isoStr) {
+    if (!isoStr) return "-";
     try {
-      overview = await api("/api/domain-automation");
-      render();
-      setConnected(document.getElementById("connection"), true);
-    } catch (error) {
-      setConnected(document.getElementById("connection"), false);
+      const d = new Date(isoStr);
+      if (isNaN(d.getTime())) return isoStr;
+      return (
+        d.getFullYear() +
+        "-" +
+        String(d.getMonth() + 1).padStart(2, "0") +
+        "-" +
+        String(d.getDate()).padStart(2, "0") +
+        " " +
+        String(d.getHours()).padStart(2, "0") +
+        ":" +
+        String(d.getMinutes()).padStart(2, "0") +
+        ":" +
+        String(d.getSeconds()).padStart(2, "0")
+      );
+    } catch {
+      return isoStr;
     }
   }
 
-  function setText(id, val) {
-    const el = document.getElementById(id);
-    if (el) el.textContent = val;
+  function showToast(message, type) {
+    type = type || "ok";
+    let container = document.querySelector(".toast-container");
+    if (!container) {
+      container = document.createElement("div");
+      container.className = "toast-container";
+      document.body.appendChild(container);
+    }
+    const toast = document.createElement("div");
+    toast.className = "toast " + type;
+    toast.textContent = message;
+    container.appendChild(toast);
+    setTimeout(() => {
+      toast.style.opacity = "0";
+      toast.style.transform = "translateY(-6px)";
+      setTimeout(() => toast.remove(), 250);
+    }, 3200);
   }
 
-  /* =============== Top-level render =============== */
-  function render() {
-    const s = overview.stats || {};
-    setText("stat-tokens", s.tokens || 0);
-    setText("stat-enabled", s.enabled_tokens || 0);
-    setText("stat-subscriptions", s.subscriptions || 0);
-    setText("stat-running", s.running_jobs || 0);
-    setText("stat-domains", s.registered_domains || 0);
-    setText("stat-cloudflare", s.cloudflare_active || 0);
+  function copyToClipboard(text, label) {
+    if (!navigator.clipboard) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    } else {
+      navigator.clipboard.writeText(text);
+    }
+    showToast("已复制 " + (label || text) + " 到剪贴板", "ok");
+  }
+
+  async function api(path, options) {
+    options = options || {};
+    const headers = Object.assign({ "Content-Type": "application/json" }, options.headers || {});
+    const res = await fetch(path, {
+      method: options.method || "GET",
+      headers,
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const body = await res.json();
+        detail = body.detail || body.error || detail;
+      } catch {}
+      throw new Error(detail);
+    }
+    return res.json();
+  }
+
+  function statusBadge(status) {
+    const s = String(status || "unknown").toLowerCase();
+    const map = {
+      ok: ["badge-ok", "正常"],
+      completed: ["badge-ok", "已完成"],
+      success: ["badge-ok", "成功"],
+      active: ["badge-ok", "已激活"],
+      valid: ["badge-ok", "有效"],
+      renewed: ["badge-ok", "已续期"],
+      running: ["badge-running", "进行中"],
+      registering: ["badge-registering", "注册中"],
+      pending: ["badge-pending", "待生效"],
+      untested: ["badge-gray", "未测试"],
+      unmanaged: ["badge-gray", "未托管"],
+      failed: ["badge-err", "失败"],
+      invalid: ["badge-err", "无效"],
+      error: ["badge-err", "异常"],
+      paused: ["badge-warn", "已暂停"],
+      skipped: ["badge-gray", "已跳过"],
+    };
+    const info = map[s] || ["badge-gray", s];
+    return '<span class="badge ' + info[0] + '">' + escapeHtml(info[1]) + "</span>";
+  }
+
+  /* =============== Tab switching =============== */
+  function showDomainTab(tabName, tabBtn) {
+    activeTab = tabName;
+    document.querySelectorAll(".tabs .tab").forEach((btn) => btn.classList.remove("active"));
+    if (tabBtn) {
+      tabBtn.classList.add("active");
+    } else {
+      const target = document.querySelector('.tabs .tab[data-tab="' + tabName + '"]');
+      if (target) target.classList.add("active");
+    }
+    document.querySelectorAll(".tab-content").forEach((el) => el.classList.remove("active"));
+    const content = document.getElementById("tab-" + tabName);
+    if (content) content.classList.add("active");
+  }
+
+  /* =============== State refresh =============== */
+  async function refresh() {
+    try {
+      overview = await api("/api/domain-automation/overview");
+      document.getElementById("connection").className = "conn connected";
+      document.getElementById("connection").innerHTML = '<span class="conn-dot"></span><span>已连接</span>';
+      renderAll();
+    } catch {
+      document.getElementById("connection").className = "conn";
+      document.getElementById("connection").innerHTML = '<span class="conn-dot"></span><span>连接失败</span>';
+    }
+  }
+
+  function renderAll() {
+    renderStats();
     renderTokens();
-    renderCloudflare();
-    renderRenewal();
     renderSubscriptions();
     renderJobs();
     renderDomains();
+    renderCloudflare();
+    renderRenewal();
+    updateTokenFilterOptions();
   }
 
-  /* =============== Cloudflare panel =============== */
-  function renderCloudflare() {
-    const c = overview.cloudflare;
-    const state = document.getElementById("cloudflare-state");
-    if (!c) {
-      state.innerHTML = '<span class="hint">尚未配置</span>';
-      return;
-    }
-    const cid = document.getElementById("cf-account-id");
-    if (cid) cid.value = c.account_id || "";
-    state.innerHTML =
-      statusBadge(c.last_status) +
-      ' <code style="margin-left:6px">' + escapeHtml(c.token_masked) + "</code>" +
-      (c.last_checked_at ? ' <span class="hint" style="margin-left:6px">' + formatTime(c.last_checked_at) + "</span>" : "") +
-      (c.last_error ? ' <span style="color:var(--err);margin-left:6px;font-size:11px">' + escapeHtml(c.last_error) + "</span>" : "");
+  function renderStats() {
+    const stats = overview.stats || {};
+    const domains = overview.domains || [];
+
+    const totalDomains = domains.length;
+    const cfActive = domains.filter((d) => d.cloudflare_status === "active").length;
+    const cfPending = domains.filter((d) => d.cloudflare_status === "pending").length;
+    const unmanaged = domains.filter((d) => !d.cloudflare_status || d.cloudflare_status === "unmanaged").length;
+    const expiring = domains.filter((d) => d.renewal_days_remaining != null && d.renewal_days_remaining <= 30).length;
+
+    const elDomains = document.getElementById("stat-domains");
+    const elCf = document.getElementById("stat-cloudflare");
+    const elPending = document.getElementById("stat-cf-pending");
+    const elUnmanaged = document.getElementById("stat-unmanaged");
+    const elExpiring = document.getElementById("stat-expiring");
+
+    if (elDomains) elDomains.textContent = totalDomains;
+    if (elCf) elCf.textContent = cfActive;
+    if (elPending) elPending.textContent = cfPending;
+    if (elUnmanaged) elUnmanaged.textContent = unmanaged;
+    if (elExpiring) elExpiring.textContent = expiring;
   }
 
-  /* =============== Renewal panel =============== */
-  function renderRenewal() {
-    const r = overview.renewal || {};
-    const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
-    const setChk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = v; };
-
-    setChk("renew-enabled", r.enabled !== false);
-    setVal("renew-before", r.renew_before_days ?? 120);
-    setVal("renew-interval-hours", Math.max(1, Math.round((r.interval_seconds || 86400) / 3600)));
-    setVal("renew-type", r.renewal_type || "free");
-    setVal("renew-years", r.renewal_years || 1);
-    setVal("renew-delay-min", r.delay_min_seconds ?? 3);
-    setVal("renew-delay-max", r.delay_max_seconds ?? 6);
-
-    const s = r.last_summary || {};
-    document.getElementById("renewal-state").innerHTML =
-      statusBadge(r.last_status || "untested") +
-      ' <span class="hint" style="margin-left:8px">' +
-      (r.last_run_at ? "上次运行 " + formatTime(r.last_run_at) : "尚未运行") +
-      (r.last_run_at
-        ? " · 检查 " + (s.checked || 0) + " · 续期 " + (s.renewed || 0) + " · 跳过 " + (s.skipped || 0) + " · 失败 " + (s.failed || 0)
-        : "") +
-      (r.last_error ? ' · <span style="color:var(--err)">' + escapeHtml(r.last_error) + "</span>" : "") +
-      "</span>";
+  function updateTokenFilterOptions() {
+    const select = document.getElementById("domain-filter-token");
+    if (!select) return;
+    const currentVal = select.value;
+    const tokens = overview.tokens || [];
+    let html = '<option value="">全部 Token</option>';
+    tokens.forEach((t) => {
+      html += '<option value="' + escapeHtml(t.id) + '">' + escapeHtml(t.name) + '</option>';
+    });
+    select.innerHTML = html;
+    select.value = currentVal;
   }
 
-  /* =============== Token pool =============== */
+  /* =============== Tokens table =============== */
   function renderTokens() {
-    const root = document.getElementById("token-list");
-    const toks = overview.tokens || [];
-    if (!toks.length) {
-      root.innerHTML =
-        '<div class="empty"><div class="empty-icon">◉</div><div class="empty-title">尚未添加 API Token</div><div class="empty-hint">从 DigitalPlat 控制台获取 dp_live_ 开头的 Token</div></div>';
+    const list = document.getElementById("token-list");
+    if (!list) return;
+    const tokens = overview.tokens || [];
+    if (!tokens.length) {
+      list.innerHTML =
+        '<div class="empty"><div class="empty-icon">◈</div><div class="empty-title">尚未配置 API Token</div><div class="empty-hint">请在上方添加你的第一个 DigitalPlat API Token</div></div>';
       return;
     }
-    root.innerHTML = toks
-      .map(
-        (t) =>
-          '<div class="list-row">' +
-          "<div>" +
-          '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
-          '<div class="row-title">' + escapeHtml(t.name) + "</div>" +
-          statusBadge(t.last_status) +
+    list.innerHTML = tokens
+      .map((t) => {
+        return (
+          '<div class="list-item" style="padding: var(--s-3) 0;">' +
+          '<div class="list-item-main">' +
+          '<div class="list-item-title" style="display:flex; align-items:center; gap:var(--s-2);">' +
+          '<strong>' + escapeHtml(t.name) + '</strong>' +
+          statusBadge(t.status || "untested") +
+          '</div>' +
+          '<div class="list-item-sub mono" style="margin-top:4px; font-size:11px;">' +
+          escapeHtml(t.masked_token) + ' · ' + escapeHtml(t.environment || "live") +
+          ' · 持有 ' + (t.registered_domains_count || 0) + ' 个域名' +
+          '</div>' +
+          (t.last_error ? '<div style="color:var(--err);font-size:11px;margin-top:3px">' + escapeHtml(t.last_error) + "</div>" : "") +
           "</div>" +
-          '<div class="row-meta"><code>' + escapeHtml(t.token_masked) + "</code>" +
-          " · " + (t.domain_count == null ? "域名数未知" : t.domain_count + " 个域名") +
-          (t.last_error ? ' · <span style="color:var(--err)">' + escapeHtml(t.last_error) + "</span>" : "") +
-          "</div>" +
-          "</div>" +
-          '<div style="display:flex; gap: 6px;">' +
+          '<div class="list-item-actions">' +
           '<button class="btn btn-secondary btn-sm" onclick="testToken(\'' + escapeHtml(t.id) + "')\">测试</button>" +
           '<button class="btn btn-danger btn-sm" onclick="deleteToken(\'' + escapeHtml(t.id) + "')\">删除</button>" +
           "</div>" +
           "</div>"
-      )
+        );
+      })
       .join("");
+
+    const select = document.getElementById("job-token-mode");
+    if (select) {
+      const current = select.value;
+      let opts = '<option value="all">使用全部启用 Token (' + (overview.stats.enabled_tokens || 0) + " 个)</option>";
+      tokens
+        .filter((t) => t.enabled)
+        .forEach((t) => {
+          opts += '<option value="' + escapeHtml(t.id) + '">仅使用：' + escapeHtml(t.name) + "</option>";
+        });
+      select.innerHTML = opts;
+      select.value = current || "all";
+    }
   }
 
   /* =============== Subscriptions =============== */
   function renderSubscriptions() {
-    const root = document.getElementById("subscription-list");
-    const subs = overview.subscriptions || [];
-    if (!subs.length) {
-      root.innerHTML =
-        '<div class="empty"><div class="empty-icon">▣</div><div class="empty-title">尚未创建前缀订阅</div><div class="empty-hint">订阅定义了生成候选域名的模式</div></div>';
-    } else {
-      root.innerHTML = subs
-        .map((s) => {
-          const separator = s.suffix === "dpdns.org" ? "" : s.separator;
-          const routing = s.auto_cloudflare
-            ? "Cloudflare 自动托管"
-            : (s.nameservers || []).map(escapeHtml).join(" · ");
-          return (
-            '<div class="list-row">' +
-            "<div>" +
-            '<div class="row-title">' + escapeHtml(s.name) + (s.auto_cloudflare ? " " + statusBadge("active") : "") + "</div>" +
-            '<div class="row-meta">' +
-            escapeHtml(s.prefix || "[随机]") + escapeHtml(separator) + "x".repeat(Math.min(s.random_length, 8)) + "." + escapeHtml(s.suffix) +
-            " · " + escapeHtml(s.slot_type) + "<br>" + routing +
-            "</div>" +
-            "</div>" +
-            '<div><button class="btn btn-danger btn-sm" onclick="deleteSubscription(\'' + escapeHtml(s.id) + "')\">删除</button></div>" +
-            "</div>"
-          );
-        })
-        .join("");
-    }
-
-    /* Update job-launcher subscription select */
+    const list = document.getElementById("subscription-list");
     const select = document.getElementById("job-subscription");
+    const subs = overview.subscriptions || [];
+
     if (select) {
       const current = select.value;
-      select.innerHTML =
-        '<option value="">选择一个前缀订阅</option>' +
-        subs
-          .map((s) => '<option value="' + escapeHtml(s.id) + '">' + escapeHtml(s.name) + " — " + escapeHtml(s.prefix || "[随机]") + "." + escapeHtml(s.suffix) + "</option>")
+      if (!subs.length) {
+        select.innerHTML = '<option value="">请先创建前缀订阅</option>';
+      } else {
+        select.innerHTML = subs
+          .map((s) => '<option value="' + escapeHtml(s.id) + '">' + escapeHtml(s.name) + " (" + escapeHtml(s.prefix) + "*." + escapeHtml(s.suffix) + ")</option>")
           .join("");
-      if (subs.some((s) => s.id === current)) select.value = current;
+        select.value = current || (subs[0] ? subs[0].id : "");
+      }
     }
+
+    if (!list) return;
+    if (!subs.length) {
+      list.innerHTML =
+        '<div class="empty"><div class="empty-icon">◈</div><div class="empty-title">尚未配置前缀订阅</div><div class="empty-hint">请在上方创建模式订阅</div></div>';
+      return;
+    }
+
+    list.innerHTML = subs
+      .map(
+        (s) =>
+          '<div class="list-item" style="padding: var(--s-3) 0;">' +
+          '<div class="list-item-main">' +
+          '<div class="list-item-title" style="font-weight:600;">' + escapeHtml(s.name) + '</div>' +
+          '<div class="list-item-sub mono" style="margin-top:4px; font-size:11px;">' +
+          escapeHtml(s.prefix) + (s.separator || "") + "{" + s.random_length + "位}." + escapeHtml(s.suffix) +
+          ' · <span style="color:var(--accent)">' + escapeHtml(s.slot_type) + '</span>' +
+          ' · ' + (s.auto_cloudflare ? '<span style="color:var(--ok)">自动托管 CF</span>' : '手动 NS') +
+          '</div>' +
+          '</div>' +
+          '<div class="list-item-actions">' +
+          '<button class="btn btn-danger btn-sm" onclick="deleteSubscription(\'' + escapeHtml(s.id) + "')\">删除</button>" +
+          '</div>' +
+          '</div>'
+      )
+      .join("");
   }
 
-  /* =============== Registration attempts (per-job stepper) =============== */
-  function attemptSteps(attempt) {
-    const byName = Object.fromEntries((attempt.steps || []).map((s) => [s.name, s]));
+  /* =============== Jobs & Stepper =============== */
+  function renderStep(step) {
+    const icon = step.status === "success" ? "✓" : step.status === "failed" ? "!" : "·";
     return (
-      '<div class="step-timeline" style="grid-template-columns: repeat(4, 1fr)">' +
-      ATTEMPT_STEP_ORDER.map((name) => {
-        const step = byName[name] || {
-          label: ATTEMPT_STEP_LABELS[name],
-          status: "pending",
-          message: "等待执行",
-        };
-        const icon = step.status === "success" ? "✓" : step.status === "failed" ? "!" : "";
-        return (
-          '<div class="timeline-step ' + escapeHtml(step.status) + '">' +
-          '<span class="step-dot">' + icon + "</span>" +
-          '<div class="step-name">' + escapeHtml(step.label) + "</div>" +
-          '<div class="step-meta">' + escapeHtml(step.message || "") + "</div>" +
-          "</div>"
-        );
-      }).join("") +
+      '<div class="step ' + escapeHtml(step.status) + '">' +
+      '<div class="step-dot">' + icon + "</div>" +
+      '<div class="step-main">' +
+      '<div class="step-title">' + escapeHtml(step.label) + "</div>" +
+      (step.message ? '<div class="step-msg">' + escapeHtml(step.message) + "</div>" : "") +
+      "</div>" +
       "</div>"
     );
   }
 
-  /* =============== Jobs list =============== */
   function renderJobs() {
-    const root = document.getElementById("job-list");
+    const list = document.getElementById("job-list");
+    if (!list) return;
     const jobs = overview.jobs || [];
     if (!jobs.length) {
-      root.innerHTML =
-        '<div class="empty" style="padding: 48px 24px"><div class="empty-icon">▸</div><div class="empty-title">暂无注册任务</div><div class="empty-hint">创建订阅后点击「开始自动注册」</div></div>';
+      list.innerHTML =
+        '<div class="empty"><div class="empty-icon">◈</div><div class="empty-title">暂无注册任务</div><div class="empty-hint">在左侧选择前缀订阅并启动任务</div></div>';
       return;
     }
 
-    const openJobs = new Set([...document.querySelectorAll(".job[open]")].map((e) => e.dataset.id));
-    const openAttempts = new Set([...document.querySelectorAll(".attempt[open]")].map((e) => e.dataset.id));
-
-    root.innerHTML = jobs
-      .map((j, index) => {
-        const pct = Math.round((j.completed_attempts / Math.max(j.max_attempts, 1)) * 100);
-        const attempts = (j.attempts || [])
-          .map((a, i) => {
-            const isAttemptOpen = openAttempts.has(a.id) || (!index && !i);
+    list.innerHTML = jobs
+      .map((job) => {
+        const attempts = (job.attempts || [])
+          .slice(-10)
+          .reverse()
+          .map((attempt) => {
+            const steps = (attempt.steps || []).map(renderStep).join("");
             return (
-              '<details class="attempt" data-id="' + escapeHtml(a.id) + '"' + (isAttemptOpen ? " open" : "") + ">" +
-              '<summary class="attempt-summary">' +
-              "<div>" +
-              '<div class="row-title">' + escapeHtml(a.domain) + "</div>" +
-              '<div class="row-meta">' + formatTime(a.created_at) + "</div>" +
+              '<div class="attempt-card" style="background:var(--bg-2);border:1px solid var(--line-1);border-radius:var(--r-2);padding:var(--s-3);margin-top:var(--s-2);">' +
+              '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:var(--s-2);">' +
+              '<strong class="mono" style="color:var(--ink-1);font-size:13px;">' + escapeHtml(attempt.candidate_domain) + "</strong>" +
+              statusBadge(attempt.status) +
               "</div>" +
-              '<div class="attempt-token">' + escapeHtml(a.token_name) + "</div>" +
-              "<div>" + statusBadge(a.status) + "</div>" +
-              '<div class="chevron">›</div>' +
-              "</summary>" +
-              attemptSteps(a) +
-              (a.error ? '<div style="color:var(--err);font-size:12px;padding-bottom:14px;padding-left:4px;">' + escapeHtml(a.error) + "</div>" : "") +
-              "</details>"
+              '<div class="stepper">' + steps + "</div>" +
+              (attempt.error ? '<div class="step-error" style="margin-top:var(--s-2);">' + escapeHtml(attempt.error) + "</div>" : "") +
+              "</div>"
             );
           })
           .join("");
 
-        const isJobOpen = openJobs.has(j.id) || index === 0;
         return (
-          '<details class="job" data-id="' + escapeHtml(j.id) + '"' + (isJobOpen ? " open" : "") + ">" +
-          '<summary class="job-summary">' +
-          "<div>" +
-          '<div class="row-title">任务 <code>' + escapeHtml(j.id) + "</code></div>" +
-          '<div class="row-meta">成功 ' + j.successful_domains + "/" + j.target_count + " · 失败尝试 " + j.failed_attempts + "</div>" +
-          "</div>" +
-          "<div>" + statusBadge(j.status) + "</div>" +
-          '<div class="job-progress"><div style="font-size:10px;color:var(--ink-3);margin-bottom:4px">尝试 ' + j.completed_attempts + "/" + j.max_attempts + '</div><div class="progress"><div class="progress-fill" style="width:' + pct + '%"></div></div></div>' +
-          '<div class="chevron">›</div>' +
-          "</summary>" +
-          '<div class="job-body">' +
-          (j.error ? '<div style="color:var(--err);font-size:12px;padding:12px 0">' + escapeHtml(j.error) + "</div>" : "") +
-          (attempts || '<div class="empty" style="padding: 20px">等待生成候选域名</div>') +
-          "</div>" +
-          "</details>"
+          '<div class="job-card" style="padding:var(--s-4);border-bottom:1px solid var(--line-1);">' +
+          '<div style="display:flex; justify-content:space-between; align-items:flex-start;">' +
+          '<div>' +
+          '<div style="display:flex; align-items:center; gap:var(--s-2);">' +
+          '<span class="mono" style="font-weight:700;font-size:13px;">' + escapeHtml(job.id) + '</span>' +
+          statusBadge(job.status) +
+          '</div>' +
+          '<div class="hint mono" style="margin-top:4px;font-size:11px;">' +
+          '模式：' + escapeHtml(job.subscription_name) + ' · 目标 ' + job.successful_domains + '/' + job.target_count +
+          ' · 尝试 ' + job.completed_attempts + '/' + job.max_attempts +
+          ' · 创建于 ' + formatTime(job.created_at) +
+          '</div>' +
+          '</div>' +
+          '</div>' +
+          (job.error ? '<div class="step-error" style="margin-top:var(--s-2);">' + escapeHtml(job.error) + "</div>" : "") +
+          (attempts ? '<div class="attempts" style="margin-top:var(--s-3);">' + attempts + "</div>" : "") +
+          "</div>"
         );
       })
       .join("");
   }
 
-  /* =============== Domains table =============== */
+  /* =============== Domains table & Filtering =============== */
   function cloudflareDetail(d) {
     const status = d.cloudflare_status || "unmanaged";
     let badge = statusBadge(status);
     if (status === "active") {
       badge = '<span class="badge badge-ok"><i class="fa-solid fa-circle-check"></i> CF 已激活</span>';
     } else if (status === "pending") {
-      badge = '<span class="badge badge-warn"><i class="fa-solid fa-clock"></i> CF 待验证</span>';
+      badge = '<span class="badge badge-warn"><i class="fa-solid fa-clock"></i> CF 待生效</span>';
     } else if (status === "failed") {
       badge = '<span class="badge badge-err"><i class="fa-solid fa-circle-xmark"></i> CF 失败</span>';
     } else {
       badge = '<span class="badge badge-neutral"><i class="fa-solid fa-circle-minus"></i> 未托管</span>';
     }
 
-    const zoneId = d.cloudflare_zone_id ? '<div class="hint mono" style="font-size:10px;margin-top:2px;">Zone: ' + escapeHtml(d.cloudflare_zone_id.slice(0, 10)) + '…</div>' : '';
-    const errorText = d.cloudflare_error ? '<div style="color:var(--err);font-size:10px;margin-top:2px">' + escapeHtml(d.cloudflare_error) + '</div>' : '';
+    const zoneId = d.cloudflare_zone_id ? '<div class="hint mono" style="font-size:10px;margin-top:2px;" title="' + escapeHtml(d.cloudflare_zone_id) + '">Zone: ' + escapeHtml(d.cloudflare_zone_id.slice(0, 10)) + '…</div>' : '';
+    const errorText = d.cloudflare_error ? '<div style="color:var(--err);font-size:10px;margin-top:2px" title="' + escapeHtml(d.cloudflare_error) + '">' + escapeHtml(d.cloudflare_error.slice(0, 30)) + '…</div>' : '';
 
     return badge + zoneId + errorText;
   }
@@ -293,47 +384,78 @@
     let daysBadge = "";
     if (days != null) {
       if (days <= 30) {
-        daysBadge = ' <span style="color:var(--err);font-weight:600">(' + days + '天)</span>';
+        daysBadge = ' <span style="color:var(--err);font-weight:700">(' + days + '天)</span>';
       } else if (days <= 90) {
-        daysBadge = ' <span style="color:var(--warn)">(' + days + '天)</span>';
+        daysBadge = ' <span style="color:var(--warn);font-weight:600">(' + days + '天)</span>';
       } else {
         daysBadge = ' <span style="color:var(--ink-3)">(' + days + '天)</span>';
       }
     }
 
     return (
-      '<div style="font-size:12px;color:var(--ink-1);">' + escapeHtml(d.expiry_date || "未知") + daysBadge + '</div>' +
+      '<div style="font-size:12px;color:var(--ink-1); font-weight:500;">' + escapeHtml(d.expiry_date || "未知") + daysBadge + '</div>' +
       '<div class="hint" style="margin-top:2px;font-size:10px;">状态: ' + statusBadge(status) +
       (d.renewed_at ? ' · ' + formatTime(d.renewed_at) : '') +
       '</div>' +
-      (d.renewal_error ? '<div style="color:var(--err);font-size:10px;margin-top:2px">' + escapeHtml(d.renewal_error) + '</div>' : '')
+      (d.renewal_error ? '<div style="color:var(--err);font-size:10px;margin-top:2px">' + escapeHtml(d.renewal_error.slice(0, 30)) + '…</div>' : '')
     );
   }
 
   function getFilteredDomains() {
     const query = (document.getElementById("domain-search") ? document.getElementById("domain-search").value : "").trim().toLowerCase();
-    const filter = document.getElementById("domain-filter-status") ? document.getElementById("domain-filter-status").value : "";
-    let list = overview.domains || [];
+    const filterStatus = document.getElementById("domain-filter-status") ? document.getElementById("domain-filter-status").value : "";
+    const filterExpiry = document.getElementById("domain-filter-expiry") ? document.getElementById("domain-filter-expiry").value : "";
+    const filterToken = document.getElementById("domain-filter-token") ? document.getElementById("domain-filter-token").value : "";
+    const sort = document.getElementById("domain-sort") ? document.getElementById("domain-sort").value : "registered_desc";
+
+    let list = (overview.domains || []).slice();
 
     if (query) {
       list = list.filter((d) => {
         const domain = (d.domain || "").toLowerCase();
         const token = (d.token_name || "").toLowerCase();
+        const zone = (d.cloudflare_zone_id || "").toLowerCase();
         const ns = ((d.nameservers || []).join(" ")).toLowerCase();
-        return domain.includes(query) || token.includes(query) || ns.includes(query);
+        return domain.includes(query) || token.includes(query) || zone.includes(query) || ns.includes(query);
       });
     }
 
-    if (filter === "cf_active") {
+    if (filterStatus === "cf_active") {
       list = list.filter((d) => d.cloudflare_status === "active");
-    } else if (filter === "cf_pending") {
+    } else if (filterStatus === "cf_pending") {
       list = list.filter((d) => d.cloudflare_status === "pending");
-    } else if (filter === "unmanaged") {
+    } else if (filterStatus === "unmanaged") {
       list = list.filter((d) => !d.cloudflare_status || d.cloudflare_status === "unmanaged");
-    } else if (filter === "cf_failed") {
+    } else if (filterStatus === "cf_failed") {
       list = list.filter((d) => d.cloudflare_status === "failed");
-    } else if (filter === "renewal_issue") {
-      list = list.filter((d) => d.renewal_status === "failed" || (d.renewal_days_remaining != null && d.renewal_days_remaining <= 30));
+    }
+
+    if (filterExpiry === "expiring_30") {
+      list = list.filter((d) => d.renewal_days_remaining != null && d.renewal_days_remaining <= 30);
+    } else if (filterExpiry === "expiring_90") {
+      list = list.filter((d) => d.renewal_days_remaining != null && d.renewal_days_remaining <= 90);
+    } else if (filterExpiry === "renewal_failed") {
+      list = list.filter((d) => d.renewal_status === "failed");
+    } else if (filterExpiry === "renewed") {
+      list = list.filter((d) => d.renewal_status === "renewed" || d.renewed_at);
+    }
+
+    if (filterToken) {
+      list = list.filter((d) => String(d.token_id || "") === String(filterToken));
+    }
+
+    if (sort === "registered_desc") {
+      list.sort((a, b) => (b.registered_at || "").localeCompare(a.registered_at || ""));
+    } else if (sort === "registered_asc") {
+      list.sort((a, b) => (a.registered_at || "").localeCompare(b.registered_at || ""));
+    } else if (sort === "expiry_asc") {
+      list.sort((a, b) => {
+        const da = a.renewal_days_remaining != null ? a.renewal_days_remaining : 99999;
+        const db = b.renewal_days_remaining != null ? b.renewal_days_remaining : 99999;
+        return da - db;
+      });
+    } else if (sort === "domain_asc") {
+      list.sort((a, b) => (a.domain || "").localeCompare(b.domain || ""));
     }
 
     return list;
@@ -367,7 +489,7 @@
 
     if (!filtered.length) {
       tbody.innerHTML =
-        '<tr><td colspan="7"><div class="empty"><div class="empty-icon">◈</div><div class="empty-title">无匹配的域名</div><div class="empty-hint">可尝试清除搜索关键词或更换筛选状态</div></div></td></tr>';
+        '<tr><td colspan="7"><div class="empty"><div class="empty-icon">◈</div><div class="empty-title">无匹配的域名</div><div class="empty-hint">请尝试调整搜索条件或筛选选项</div></div></td></tr>';
       return;
     }
 
@@ -376,17 +498,23 @@
         (d) =>
           "<tr>" +
           '<td><input type="checkbox" class="domain-checkbox" value="' + escapeHtml(d.domain) + '"></td>' +
-          '<td><strong style="color:var(--ink-1);font-size:13px;">' + escapeHtml(d.domain) + "</strong>" +
-          '<div class="hint mono" style="margin-top:3px;font-size:11px">' + ((d.nameservers || []).map(escapeHtml).join(" · ") || "尚未设置 NS") + "</div></td>" +
+          '<td>' +
+          '<div style="display:flex; align-items:center; gap:6px;">' +
+          '<strong style="color:var(--ink-1);font-size:13px; cursor:pointer;" onclick="copyToClipboard(\'' + escapeHtml(d.domain) + '\')" title="点击复制域名">' +
+          escapeHtml(d.domain) +
+          ' <i class="fa-regular fa-copy" style="font-size:10px; color:var(--ink-3);"></i></strong>' +
+          '</div>' +
+          '<div class="hint mono" style="margin-top:3px;font-size:11px">' + ((d.nameservers || []).map(escapeHtml).join(" · ") || "尚未设置 NS") + "</div>" +
+          '</td>' +
           '<td><div class="row-title" style="font-size:12px;">' + escapeHtml(d.token_name || "-") + '</div><div class="hint" style="font-size:10px;">' + escapeHtml(d.slot_type || "-") + "</div></td>" +
           "<td>" + cloudflareDetail(d) + "</td>" +
           "<td>" + renewalDetail(d) + "</td>" +
           '<td class="mono" style="font-size:11px">' + escapeHtml(formatTime(d.registered_at)) + "</td>" +
           '<td>' +
-          '<div style="display:flex; gap:4px; flex-wrap:wrap;">' +
+          '<div style="display:flex; gap:4px; justify-content:flex-end; flex-wrap:wrap;">' +
           '<button class="btn btn-ghost btn-sm" onclick="viewDomainDetail(\'' + escapeHtml(d.domain) + '\')" title="查看详情与编辑NS">详情</button>' +
           (d.cloudflare_status === "active"
-            ? '<button class="btn btn-secondary btn-sm" onclick="refreshDomain(\'' + escapeHtml(d.domain) + '\')" title="刷新CF与DP真实状态">检测</button>'
+            ? '<button class="btn btn-secondary btn-sm" onclick="refreshDomain(\'' + escapeHtml(d.domain) + '\')" title="检测CF真实状态">检测</button>'
             : '<button class="btn btn-secondary btn-sm" onclick="hostCloudflare(\'' + escapeHtml(d.domain) + '\')" title="托管到 Cloudflare">托管CF</button>') +
           '<button class="btn btn-danger btn-sm" onclick="deleteDomain(\'' + escapeHtml(d.domain) + '\')" title="删除域名记录">删除</button>' +
           '</div>' +
@@ -396,15 +524,49 @@
       .join("");
   }
 
-  /* =============== Actions =============== */
+  /* =============== Settings (Cloudflare & Renewal) =============== */
+  function renderCloudflare() {
+    const cf = overview.cloudflare;
+    const el = document.getElementById("cloudflare-state");
+    if (!el) return;
+    if (!cf || !cf.account_id) {
+      el.textContent = "尚未配置 Cloudflare 凭据";
+      return;
+    }
+    const acc = document.getElementById("cf-account-id");
+    if (acc && !acc.value) acc.value = cf.account_id || "";
+    el.innerHTML =
+      '<span class="badge ' + (cf.enabled ? "badge-ok" : "badge-err") + '">' + (cf.enabled ? "已启用" : "未验证") + "</span>" +
+      '<span style="margin-left:8px;" class="mono">' + escapeHtml(cf.account_id) + "</span>" +
+      (cf.last_tested_at ? '<span class="hint" style="margin-left:8px;">测试于 ' + formatTime(cf.last_tested_at) + "</span>" : "") +
+      (cf.last_error ? '<div style="color:var(--err);font-size:11px;margin-top:4px">' + escapeHtml(cf.last_error) + "</div>" : "");
+  }
+
+  function renderRenewal() {
+    const rn = overview.renewal || {};
+    const el = document.getElementById("renewal-state");
+    if (!el) return;
+    const isRunning = rn.running;
+    el.innerHTML =
+      '<span class="badge ' + (rn.enabled ? (isRunning ? "badge-running" : "badge-ok") : "badge-gray") + '">' +
+      (rn.enabled ? (isRunning ? "正在续期中…" : "自动续期已开启") : "自动续期已关闭") +
+      "</span>" +
+      (rn.last_run_at ? '<span class="hint" style="margin-left:8px;">上次运行：' + formatTime(rn.last_run_at) + "</span>" : "") +
+      (rn.last_error ? '<div style="color:var(--err);font-size:11px;margin-top:4px">' + escapeHtml(rn.last_error) + "</div>" : "");
+  }
+
+  /* =============== Actions & Operations =============== */
   async function addToken() {
+    const name = document.getElementById("token-name").value.trim();
+    const token = document.getElementById("token-value").value.trim();
+    if (!name || !token) {
+      showToast("请填写 Token 名称与 Token 密钥", "warn");
+      return;
+    }
     try {
       await api("/api/domain-automation/tokens", {
         method: "POST",
-        body: {
-          name: document.getElementById("token-name").value,
-          token: document.getElementById("token-value").value,
-        },
+        body: { name, token },
       });
       document.getElementById("token-value").value = "";
       showToast("Token 已添加");
@@ -418,6 +580,7 @@
     try {
       showToast("正在测试 Token…", "info");
       await api("/api/domain-automation/tokens/" + id + "/test", { method: "POST" });
+      showToast("Token 测试成功，状态正常");
       await refresh();
     } catch (e) {
       showToast(e.message, "error");
@@ -428,6 +591,7 @@
     if (!window.confirm("确认删除这个 API Token？")) return;
     try {
       await api("/api/domain-automation/tokens/" + id, { method: "DELETE" });
+      showToast("Token 已删除");
       await refresh();
     } catch (e) {
       showToast(e.message, "error");
@@ -436,17 +600,21 @@
 
   function toggleNameservers() {
     const auto = document.getElementById("sub-auto-cloudflare").checked;
-    document.getElementById("manual-nameservers").style.display = auto ? "none" : "block";
+    const el = document.getElementById("manual-nameservers");
+    if (el) el.style.display = auto ? "none" : "block";
   }
 
   async function saveCloudflare() {
+    const account_id = document.getElementById("cf-account-id").value.trim();
+    const api_token = document.getElementById("cf-token").value.trim();
+    if (!account_id || !api_token) {
+      showToast("请填写 Cloudflare Account ID 和 API Token", "warn");
+      return;
+    }
     try {
       await api("/api/domain-automation/cloudflare", {
         method: "PUT",
-        body: {
-          account_id: document.getElementById("cf-account-id").value,
-          api_token: document.getElementById("cf-token").value,
-        },
+        body: { account_id, api_token },
       });
       document.getElementById("cf-token").value = "";
       showToast("Cloudflare 配置已保存");
@@ -458,8 +626,9 @@
 
   async function testCloudflare() {
     try {
-      showToast("正在测试 Cloudflare Token…", "info");
+      showToast("正在测试 Cloudflare 连接…", "info");
       await api("/api/domain-automation/cloudflare/test", { method: "POST" });
+      showToast("Cloudflare 验证成功，连接正常");
       await refresh();
     } catch (e) {
       showToast(e.message, "error");
@@ -532,6 +701,29 @@
       await refresh();
     } catch (e) {
       showToast("检测失败: " + e.message, "error");
+    }
+  }
+
+  async function bulkRefreshCloudflare() {
+    try {
+      showToast("正在批量检测所有域名的 Cloudflare 真实状态…", "info");
+      const res = await api("/api/domain-automation/domains/bulk-refresh-cf", { method: "POST" });
+      showToast("检测完成：已刷新 " + res.refreshed_count + " 个域名（活跃 " + res.active_count + " · 待生效 " + res.pending_count + "）");
+      await refresh();
+    } catch (e) {
+      showToast("批量检测失败: " + e.message, "error");
+    }
+  }
+
+  async function cleanupCloudflareDuplicates() {
+    if (!window.confirm("确认执行 Cloudflare 重复/失败托管清理？\n\n系统将自动合并重复域名记录，并重置失败的托管状态以便重新配置。")) return;
+    try {
+      showToast("正在清理重复与失败托管记录…", "info");
+      const res = await api("/api/domain-automation/domains/cleanup-cf", { method: "POST" });
+      showToast("清理完成：合并重复记录 " + res.merged_duplicates + " 条，重置失败状态 " + res.reset_failed_states + " 条");
+      await refresh();
+    } catch (e) {
+      showToast("清理失败: " + e.message, "error");
     }
   }
 
@@ -616,22 +808,91 @@
     }
   }
 
-  async function hostAllCloudflare() {
-    const domains = (overview.domains || []).filter((d) => d.cloudflare_status !== "active");
-    if (!domains.length) {
-      showToast("所有域名已在 Cloudflare 处于 Active 状态");
+  /* =============== Bulk NS modal =============== */
+  function showBulkNsModal() {
+    const selected = getSelectedDomains();
+    if (!selected.length) {
+      showToast("请先在表格中勾选要修改 Nameservers 的域名", "warn");
       return;
     }
-    if (!window.confirm("确认依次托管 " + domains.length + " 个未激活域名到 Cloudflare？")) return;
-    for (const d of domains) {
-      showToast("正在配置 " + d.domain + "…", "info");
-      try {
-        await api("/api/domain-automation/domains/" + encodeURIComponent(d.domain) + "/cloudflare", { method: "POST" });
-      } catch (e) {
-        showToast(d.domain + "：" + e.message, "error");
-      }
+    const sub = document.getElementById("bulk-ns-modal-sub");
+    if (sub) {
+      sub.textContent = "已选中 " + selected.length + " 个域名，将统一更新为下方指定的 DNS 服务器";
     }
-    await refresh();
+    document.getElementById("bulk-ns-modal").classList.add("active");
+  }
+
+  function closeBulkNsModal() {
+    const modal = document.getElementById("bulk-ns-modal");
+    if (modal) modal.classList.remove("active");
+  }
+
+  async function saveBulkNameservers() {
+    const selected = getSelectedDomains();
+    if (!selected.length) {
+      showToast("未勾选任何域名", "warn");
+      return;
+    }
+    const ns1 = document.getElementById("bulk-ns1").value.trim();
+    const ns2 = document.getElementById("bulk-ns2").value.trim();
+    if (!ns1 || !ns2) {
+      showToast("请填写两个有效的 Nameservers", "warn");
+      return;
+    }
+
+    try {
+      showToast("正在批量更新 " + selected.length + " 个域名的 Nameservers…", "info");
+      const res = await api("/api/domain-automation/domains/bulk-nameservers", {
+        method: "POST",
+        body: {
+          domains: selected,
+          nameservers: [ns1, ns2],
+        },
+      });
+      showToast("批量更新完成：成功 " + res.updated_count + " 个，失败 " + res.failed_count + " 个");
+      closeBulkNsModal();
+      await refresh();
+    } catch (e) {
+      showToast("批量更新失败: " + e.message, "error");
+    }
+  }
+
+  /* =============== Export =============== */
+  function exportDomains(format) {
+    const filtered = getFilteredDomains();
+    if (!filtered.length) {
+      showToast("当前无任何域名可导出", "warn");
+      return;
+    }
+
+    if (format === "csv") {
+      let csv = "\uFEFF域名,所属Token,容量类型,Cloudflare状态,Zone ID,到期时间,剩余天数,Nameservers,注册时间\n";
+      filtered.forEach((d) => {
+        const line = [
+          '"' + (d.domain || "") + '"',
+          '"' + (d.token_name || "") + '"',
+          '"' + (d.slot_type || "") + '"',
+          '"' + (d.cloudflare_status || "unmanaged") + '"',
+          '"' + (d.cloudflare_zone_id || "") + '"',
+          '"' + (d.expiry_date || "") + '"',
+          '"' + (d.renewal_days_remaining != null ? d.renewal_days_remaining : "") + '"',
+          '"' + ((d.nameservers || []).join(" | ")) + '"',
+          '"' + (d.registered_at || "") + '"',
+        ].join(",");
+        csv += line + "\n";
+      });
+
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "digitalplat-domains-" + new Date().toISOString().slice(0, 10) + ".csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      showToast("已导出 " + filtered.length + " 个域名到 CSV");
+    }
   }
 
   /* =============== Domain Detail Modal =============== */
@@ -685,7 +946,7 @@
       '<div><label>Nameserver 1</label><input type="text" id="edit-domain-ns1" value="' + escapeHtml(ns1) + '"></div>' +
       '<div><label>Nameserver 2</label><input type="text" id="edit-domain-ns2" value="' + escapeHtml(ns2) + '"></div>' +
       '</div>' +
-      '<div style="display:flex; gap: var(--s-3); align-items:center; margin-top:10px;">' +
+      '<div style="display:flex; gap: var(--s-3); align-items:center; margin-top:10px; flex-wrap:wrap;">' +
       '<button class="btn btn-primary btn-sm" onclick="saveDomainNameservers(\'' + escapeHtml(domain.domain) + '\')"><i class="fa-solid fa-check"></i> 更新 Nameservers</button>' +
       '<button class="btn btn-secondary btn-sm" onclick="refreshDomain(\'' + escapeHtml(domain.domain) + '\')"><i class="fa-solid fa-arrows-rotate"></i> 检测真实状态</button>' +
       '<button class="btn btn-ghost btn-sm" onclick="hostCloudflare(\'' + escapeHtml(domain.domain) + '\')"><i class="fa-solid fa-cloud-arrow-up"></i> 重新托管到 CF</button>' +
@@ -753,6 +1014,7 @@
     if (!window.confirm("确认删除这个前缀订阅？")) return;
     try {
       await api("/api/domain-automation/subscriptions/" + id, { method: "DELETE" });
+      showToast("前缀订阅已删除");
       await refresh();
     } catch (e) {
       showToast(e.message, "error");
@@ -763,11 +1025,13 @@
     const button = document.getElementById("start-job");
     button.disabled = true;
     try {
+      const tokenMode = document.getElementById("job-token-mode").value;
       const job = await api("/api/domain-automation/jobs", {
         method: "POST",
         body: {
           subscription_id: document.getElementById("job-subscription").value,
           target_count: Number(document.getElementById("job-count").value),
+          token_ids: tokenMode === "all" ? null : [tokenMode],
           max_attempts: Number(document.getElementById("job-attempts").value),
           delay_min_seconds: Number(document.getElementById("job-delay-min").value),
           delay_max_seconds: Number(document.getElementById("job-delay-max").value),
@@ -784,6 +1048,7 @@
 
   /* =============== Expose globals =============== */
   Object.assign(window, {
+    showDomainTab,
     refresh,
     addToken,
     testToken,
@@ -796,11 +1061,17 @@
     runRenewal,
     hostCloudflare,
     refreshDomain,
+    bulkRefreshCloudflare,
+    cleanupCloudflareDuplicates,
+    showBulkNsModal,
+    closeBulkNsModal,
+    saveBulkNameservers,
+    exportDomains,
+    copyToClipboard,
     deleteDomain,
     bulkDeleteDomains,
     cleanupInvalidDomains,
     syncDomains,
-    hostAllCloudflare,
     filterDomains,
     toggleSelectAllDomains,
     viewDomainDetail,

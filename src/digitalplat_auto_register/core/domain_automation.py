@@ -1467,6 +1467,133 @@ class DomainAutomationManager:
         await self.store.save()
         return record
 
+    async def cleanup_cf_duplicates(self) -> Dict[str, Any]:
+        unique_map: Dict[str, Dict[str, Any]] = {}
+        merged_count = 0
+        cleaned_errors = 0
+
+        for item in self.store.domains:
+            if not isinstance(item, dict) or not item.get("domain"):
+                continue
+            name = str(item["domain"]).strip().lower().rstrip(".")
+            if name in unique_map:
+                existing = unique_map[name]
+                if item.get("cloudflare_status") == "active":
+                    existing["cloudflare_status"] = "active"
+                    existing["cloudflare_zone_id"] = item.get("cloudflare_zone_id") or existing.get("cloudflare_zone_id")
+                    existing["cloudflare_nameservers"] = item.get("cloudflare_nameservers") or existing.get("cloudflare_nameservers")
+                    existing["cloudflare_error"] = None
+                elif existing.get("cloudflare_status") != "active" and item.get("cloudflare_status"):
+                    existing["cloudflare_status"] = item.get("cloudflare_status")
+                if item.get("nameservers"):
+                    existing["nameservers"] = item["nameservers"]
+                if item.get("expiry_date"):
+                    existing["expiry_date"] = item["expiry_date"]
+                merged_count += 1
+            else:
+                unique_map[name] = dict(item)
+
+        cleaned_list = list(unique_map.values())
+        for rec in cleaned_list:
+            if rec.get("cloudflare_status") == "failed" and rec.get("cloudflare_error"):
+                rec["cloudflare_status"] = "unmanaged"
+                rec["cloudflare_error"] = None
+                cleaned_errors += 1
+
+        self.store.domains = cleaned_list
+        await self.store.save()
+        return {
+            "merged_duplicates": merged_count,
+            "reset_failed_states": cleaned_errors,
+            "total_domains": len(self.store.domains),
+        }
+
+    async def bulk_update_nameservers(self, domains: List[str], nameservers: List[str]) -> Dict[str, Any]:
+        cleaned_ns = [str(ns).strip().lower().rstrip(".") for ns in nameservers if str(ns).strip()]
+        if len(cleaned_ns) < 2 or any(not HOSTNAME_PATTERN.fullmatch(ns) for ns in cleaned_ns):
+            raise ValueError("At least two valid hostname nameservers are required")
+
+        updated = 0
+        errors = []
+        target_set = {str(d).strip().lower().rstrip(".") for d in domains if d}
+
+        for record in self.store.domains:
+            domain_name = str(record.get("domain", "")).strip().lower().rstrip(".")
+            if domain_name not in target_set:
+                continue
+            token_id = str(record.get("token_id", ""))
+            token = self.store.tokens.get(token_id)
+            if not token or not token.enabled:
+                errors.append({"domain": domain_name, "error": "Token not found or disabled"})
+                continue
+            try:
+                client = self.client_factory(token.token, self.api_base)
+                await _run_sync(client.update_nameservers, record["domain"], cleaned_ns)
+                record["nameservers"] = cleaned_ns
+                updated += 1
+            except Exception as error:
+                errors.append({"domain": domain_name, "error": str(error)})
+
+        await self.store.save()
+        return {
+            "updated_count": updated,
+            "failed_count": len(errors),
+            "errors": errors,
+        }
+
+    async def bulk_refresh_cf_status(self, domains: Optional[List[str]] = None) -> Dict[str, Any]:
+        if not self.store.cloudflare or not self.store.cloudflare.enabled:
+            raise ValueError("Cloudflare configuration is missing or disabled")
+
+        target_set = {str(d).strip().lower().rstrip(".") for d in domains} if domains else None
+        cloudflare = self._cloudflare_client()
+        refreshed = 0
+        active_count = 0
+        pending_count = 0
+        errors = []
+
+        for record in self.store.domains:
+            domain_name = str(record.get("domain", "")).strip().lower().rstrip(".")
+            if target_set and domain_name not in target_set:
+                continue
+            try:
+                zone_id = record.get("cloudflare_zone_id")
+                if not zone_id:
+                    zone = await _run_sync(cloudflare.find_zone, record["domain"])
+                    if zone and zone.get("id"):
+                        zone_id = str(zone["id"])
+                        record["cloudflare_zone_id"] = zone_id
+                        record["cloudflare_nameservers"] = [
+                            str(item).strip().lower().rstrip(".")
+                            for item in zone.get("name_servers", [])
+                            if str(item).strip()
+                        ]
+                if zone_id:
+                    latest = await _run_sync(cloudflare.get_zone, zone_id)
+                    st = str(latest.get("status", "pending")).lower()
+                    record["cloudflare_status"] = "active" if st == "active" else st
+                    record["cloudflare_checked_at"] = _timestamp()
+                    record["cloudflare_error"] = None
+                    if st == "active":
+                        active_count += 1
+                    else:
+                        pending_count += 1
+                else:
+                    record["cloudflare_status"] = "unmanaged"
+                refreshed += 1
+            except Exception as error:
+                errors.append({"domain": domain_name, "error": str(error)})
+                record["cloudflare_error"] = _safe_error(error)
+
+        await self.store.save()
+        return {
+            "refreshed_count": refreshed,
+            "active_count": active_count,
+            "pending_count": pending_count,
+            "failed_count": len(errors),
+            "errors": errors,
+        }
+
     def overview(self) -> Dict[str, Any]:
         jobs = sorted(self.store.jobs.values(), key=lambda item: item.created_at, reverse=True)
         return {

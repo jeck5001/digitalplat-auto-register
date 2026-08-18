@@ -1349,6 +1349,35 @@ def create_app(
         except Exception as error:
             raise HTTPException(status_code=500, detail=str(error)) from error
 
+    @app.post("/api/domain-automation/domains/cleanup-cf")
+    async def cleanup_cf_duplicates() -> Dict[str, Any]:
+        return await domain_manager.cleanup_cf_duplicates()
+
+    @app.post("/api/domain-automation/domains/bulk-nameservers")
+    async def bulk_update_domain_nameservers(request: Dict[str, Any]) -> Dict[str, Any]:
+        domains = request.get("domains", [])
+        nameservers = request.get("nameservers", [])
+        if not isinstance(domains, list) or not domains:
+            raise HTTPException(status_code=400, detail="domains list is required")
+        if not isinstance(nameservers, list) or len(nameservers) < 2:
+            raise HTTPException(status_code=400, detail="At least two nameservers are required")
+        try:
+            return await domain_manager.bulk_update_nameservers(domains, nameservers)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+
+    @app.post("/api/domain-automation/domains/bulk-refresh-cf")
+    async def bulk_refresh_cf_status(request: Dict[str, Any] = None) -> Dict[str, Any]:
+        domains = (request or {}).get("domains")
+        try:
+            return await domain_manager.bulk_refresh_cf_status(domains)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+
     @app.post("/api/domain-automation/domains/sync")
     async def sync_digitalplat_domains() -> Dict[str, Any]:
         return await domain_manager.sync_domains()
