@@ -3,12 +3,17 @@
 .env
 .venv
 venv
+build
+dist
 __pycache__
 *.py[cod]
 *.log
 *.egg-info
 .pytest_cache
 .mypy_cache
+.DS_Store
+.idea
+.vscode
 data
 config.local.yaml
 digitalplat_register.log
