@@ -49,52 +49,55 @@
   </div>
 
   <section class="card">
-    <div class="card-head" style="align-items:flex-start;">
-      <div>
+    <div class="card-head" style="align-items: center; justify-content: space-between; flex-wrap: nowrap; gap: var(--s-3);">
+      <div style="flex-shrink: 0;">
         <div class="card-title">域名列表与治理</div>
-        <div class="card-hint">支持搜索、筛选、CF状态检测、批量改NS、去重清理与导出</div>
+        <div class="card-hint">支持搜索、筛选、CF状态检测、批量改NS、去重清理与分页</div>
       </div>
-      <div style="display:flex; gap: var(--s-2); align-items: center; flex-wrap: wrap; justify-content: flex-end;">
-        <button class="btn btn-primary btn-sm" onclick="openCloudflareZonesModal()"><i class="fa-solid fa-broom"></i> CF 线上站点清理</button>
+      <div style="display:flex; gap: 6px; align-items: center; flex-wrap: nowrap; justify-content: flex-end;">
+        <button class="btn btn-primary btn-sm" onclick="openCloudflareZonesModal()"><i class="fa-solid fa-broom"></i> CF 线上清理</button>
         <button class="btn btn-secondary btn-sm" onclick="syncDomains()"><i class="fa-solid fa-arrows-rotate"></i> 同步 DP</button>
-        <button class="btn btn-secondary btn-sm" onclick="bulkRefreshCloudflare()"><i class="fa-solid fa-cloud"></i> 检测全部 CF 状态</button>
-        <button class="btn btn-ghost btn-sm" onclick="cleanupCloudflareDuplicates()"><i class="fa-solid fa-wand-magic-sparkles"></i> 清理重复/失败托管</button>
-        <button class="btn btn-ghost btn-sm" onclick="showBulkNsModal()"><i class="fa-solid fa-server"></i> 批量修改 NS</button>
-        <button class="btn btn-ghost btn-sm" onclick="exportDomains('csv')"><i class="fa-solid fa-download"></i> 导出 CSV</button>
+        <button class="btn btn-ghost btn-sm" onclick="showBulkNsModal()"><i class="fa-solid fa-server"></i> 批量改 NS</button>
+        <button class="btn btn-ghost btn-sm" onclick="exportDomains('csv')"><i class="fa-solid fa-download"></i> 导出</button>
         <button class="btn btn-danger btn-sm" onclick="bulkDeleteDomains()"><i class="fa-solid fa-trash"></i> 删除选中</button>
-        <button class="btn btn-ghost btn-sm" onclick="cleanupInvalidDomains()" title="清理失败或无效记录"><i class="fa-solid fa-broom"></i> 清理无效</button>
+        <div class="dropdown" id="domain-more-actions">
+          <button class="btn btn-ghost btn-sm" onclick="toggleDomainMoreMenu(event)"><i class="fa-solid fa-ellipsis-vertical"></i> 更多 ▾</button>
+          <div class="dropdown-menu">
+            <button class="dropdown-item" onclick="bulkRefreshCloudflare()"><i class="fa-solid fa-cloud"></i> 检测全部 CF 状态</button>
+            <button class="dropdown-item" onclick="cleanupCloudflareDuplicates()"><i class="fa-solid fa-wand-magic-sparkles"></i> 清理重复/失败托管</button>
+            <button class="dropdown-item" onclick="cleanupInvalidDomains()"><i class="fa-solid fa-broom"></i> 清理无效/失败记录</button>
+          </div>
+        </div>
       </div>
     </div>
 
-    <div class="card-body" style="padding-bottom: var(--s-3);">
-      <div class="toolbar" style="gap: var(--s-2); flex-wrap: wrap;">
-        <input id="domain-search" type="text" class="search-box" style="min-width: 200px;" placeholder="搜索域名、Token、NS、Zone ID…" oninput="filterDomains()">
+    <div class="card-body" style="padding-top: var(--s-3); padding-bottom: var(--s-3);">
+      <div class="domain-filter-bar">
+        <input id="domain-search" type="text" class="search-box" placeholder="搜索域名、Token、NS、Zone ID…" oninput="filterDomains()">
         <select id="domain-filter-status" onchange="filterDomains()">
           <option value="">全部 CF 状态</option>
-          <option value="cf_active">Cloudflare 已激活</option>
-          <option value="cf_pending">Cloudflare 待生效</option>
+          <option value="cf_active">CF 已激活</option>
+          <option value="cf_pending">CF 待生效</option>
           <option value="unmanaged">未托管到 CF</option>
           <option value="cf_failed">CF 托管失败</option>
         </select>
         <select id="domain-filter-expiry" onchange="filterDomains()">
-          <option value="">全部到期/续期状态</option>
-          <option value="expiring_30">30 天内即将到期</option>
-          <option value="expiring_90">90 天内即将到期</option>
-          <option value="renewal_failed">续期异常 / 失败</option>
+          <option value="">全部到期状态</option>
+          <option value="expiring_30">30天内到期</option>
+          <option value="expiring_90">90天内到期</option>
+          <option value="renewal_failed">续期异常/失败</option>
           <option value="renewed">已成功续期</option>
         </select>
         <select id="domain-filter-token" onchange="filterDomains()">
           <option value="">全部 Token</option>
         </select>
         <select id="domain-sort" onchange="filterDomains()">
-          <option value="registered_desc">注册时间 (最新优先)</option>
-          <option value="registered_asc">注册时间 (最早优先)</option>
-          <option value="expiry_asc">到期时间 (即将到期优先)</option>
+          <option value="registered_desc">注册时间 (最新)</option>
+          <option value="registered_asc">注册时间 (最早)</option>
+          <option value="expiry_asc">到期时间 (紧急)</option>
           <option value="domain_asc">域名名称 (A-Z)</option>
         </select>
-        <div class="toolbar-end" style="margin-left:auto; display:flex; align-items:center; gap:var(--s-2);">
-          <span class="hint" id="domain-count">0 个</span>
-        </div>
+        <span class="hint" id="domain-count" style="flex-shrink:0; font-size:12px; margin-left:auto;">0 个</span>
       </div>
     </div>
 
@@ -114,6 +117,22 @@
           </thead>
           <tbody id="domain-table"></tbody>
         </table>
+      </div>
+      <div class="pagination-bar" id="domain-pagination-bar">
+        <div class="pagination-info">
+          <span id="pagination-summary">显示第 1-30 条，共 0 条</span>
+          <label style="display:inline-flex; align-items:center; gap:4px; font-weight:normal; margin:0;">
+            <span>每页</span>
+            <select id="pagination-page-size" class="page-size-select" onchange="changePageSize(this.value)">
+              <option value="15">15</option>
+              <option value="30" selected>30</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+            <span>条</span>
+          </label>
+        </div>
+        <div class="pagination-pages" id="pagination-pages"></div>
       </div>
     </div>
   </section>

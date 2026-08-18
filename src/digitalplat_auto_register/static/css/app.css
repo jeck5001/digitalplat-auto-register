@@ -1145,6 +1145,138 @@ tbody tr:last-child td { border-bottom: 0; }
 .toolbar-end { margin-left: auto; display: flex; gap: var(--s-3); }
 .search-box { flex: 1; min-width: 220px; max-width: 400px; }
 
+/* ============ Single-line Domain Filter Bar ============ */
+.domain-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+  margin-bottom: var(--s-3);
+  overflow-x: auto;
+  padding: 2px 0;
+}
+.domain-filter-bar .search-box {
+  flex: 1 1 200px;
+  min-width: 150px;
+  max-width: 320px;
+  height: 34px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+}
+.domain-filter-bar select {
+  width: auto;
+  flex: 0 0 auto;
+  max-width: 150px;
+  height: 34px;
+  padding: 6px 24px 6px 10px;
+  font-size: 12px;
+  background-position: right 8px center;
+}
+
+/* ============ Dropdown Action Menu ============ */
+.dropdown {
+  position: relative;
+  display: inline-block;
+}
+.dropdown-menu {
+  display: none;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  background: var(--bg-1);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-2);
+  min-width: 180px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  z-index: 50;
+  padding: 4px 0;
+}
+.dropdown.active .dropdown-menu {
+  display: block;
+  animation: fadeIn var(--t-fast);
+}
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  cursor: pointer;
+  background: none;
+  border: none;
+  width: 100%;
+  text-align: left;
+  transition: all var(--t-fast);
+}
+.dropdown-item:hover {
+  background: var(--bg-2);
+  color: var(--ink-1);
+}
+
+/* ============ Table Pagination ============ */
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px var(--s-4);
+  border-top: 1px solid var(--line-1);
+  background: var(--bg-1);
+  font-size: 12px;
+  color: var(--ink-2);
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.pagination-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.pagination-pages {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.page-btn {
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-1);
+  border: 1px solid var(--line-2);
+  background: var(--bg-2);
+  color: var(--ink-2);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all var(--t-fast);
+}
+.page-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--ink-1);
+}
+.page-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06090f;
+  font-weight: 700;
+}
+.page-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.page-size-select {
+  height: 28px;
+  padding: 2px 20px 2px 8px;
+  font-size: 11.5px;
+  border-radius: var(--r-1);
+  border: 1px solid var(--line-2);
+  background: var(--bg-2);
+  color: var(--ink-2);
+  width: auto;
+}
+
 /* ============ Mono utilities ============ */
 .mono, .task-id {
   font-family: var(--font-mono);

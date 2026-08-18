@@ -469,8 +469,84 @@
     return list;
   }
 
+  let domainPage = 1;
+  let domainPageSize = 30;
+
   function filterDomains() {
+    domainPage = 1;
     renderDomains();
+  }
+
+  function changePageSize(sz) {
+    domainPageSize = Number(sz) || 30;
+    domainPage = 1;
+    renderDomains();
+  }
+
+  function goToPage(p) {
+    domainPage = p;
+    renderDomains();
+  }
+
+  function toggleDomainMoreMenu(e) {
+    if (e) e.stopPropagation();
+    const menu = document.getElementById("domain-more-actions");
+    if (menu) menu.classList.toggle("active");
+  }
+
+  document.addEventListener("click", () => {
+    const menu = document.getElementById("domain-more-actions");
+    if (menu) menu.classList.remove("active");
+  });
+
+  function renderPagination(totalItems) {
+    const summary = document.getElementById("pagination-summary");
+    const pagesContainer = document.getElementById("pagination-pages");
+
+    if (totalItems === 0) {
+      if (summary) summary.textContent = "显示 0 条，共 0 条";
+      if (pagesContainer) pagesContainer.innerHTML = "";
+      return;
+    }
+
+    const totalPages = Math.ceil(totalItems / domainPageSize) || 1;
+    if (domainPage > totalPages) domainPage = totalPages;
+    if (domainPage < 1) domainPage = 1;
+
+    const start = (domainPage - 1) * domainPageSize + 1;
+    const end = Math.min(domainPage * domainPageSize, totalItems);
+
+    if (summary) {
+      summary.textContent = "显示第 " + start + "-" + end + " 条，共 " + totalItems + " 条";
+    }
+
+    if (!pagesContainer) return;
+
+    let html = "";
+    html += '<button class="page-btn" ' + (domainPage === 1 ? 'disabled' : '') + ' onclick="goToPage(1)" title="首页">«</button>';
+    html += '<button class="page-btn" ' + (domainPage === 1 ? 'disabled' : '') + ' onclick="goToPage(' + (domainPage - 1) + ')" title="上一页">‹</button>';
+
+    let startPage = Math.max(1, domainPage - 2);
+    let endPage = Math.min(totalPages, domainPage + 2);
+
+    if (startPage > 1) {
+      html += '<button class="page-btn" onclick="goToPage(1)">1</button>';
+      if (startPage > 2) html += '<span style="padding:0 2px; color:var(--ink-3)">…</span>';
+    }
+
+    for (let p = startPage; p <= endPage; p++) {
+      html += '<button class="page-btn ' + (p === domainPage ? 'active' : '') + '" onclick="goToPage(' + p + ')">' + p + '</button>';
+    }
+
+    if (endPage < totalPages) {
+      if (endPage < totalPages - 1) html += '<span style="padding:0 2px; color:var(--ink-3)">…</span>';
+      html += '<button class="page-btn" onclick="goToPage(' + totalPages + ')">' + totalPages + '</button>';
+    }
+
+    html += '<button class="page-btn" ' + (domainPage === totalPages ? 'disabled' : '') + ' onclick="goToPage(' + (domainPage + 1) + ')" title="下一页">›</button>';
+    html += '<button class="page-btn" ' + (domainPage === totalPages ? 'disabled' : '') + ' onclick="goToPage(' + totalPages + ')" title="末页">»</button>';
+
+    pagesContainer.innerHTML = html;
   }
 
   function toggleSelectAllDomains() {
@@ -489,19 +565,28 @@
     const filtered = getFilteredDomains();
     const countEl = document.getElementById("domain-count");
     if (countEl) {
-      countEl.textContent = "显示 " + filtered.length + " / 共 " + allDomains.length + " 个";
+      countEl.textContent = "共 " + filtered.length + " 个";
     }
 
     const tbody = document.getElementById("domain-table");
     if (!tbody) return;
 
+    const selectAll = document.getElementById("domain-select-all");
+    if (selectAll) selectAll.checked = false;
+
     if (!filtered.length) {
       tbody.innerHTML =
         '<tr><td colspan="7"><div class="empty"><div class="empty-icon">◈</div><div class="empty-title">无匹配的域名</div><div class="empty-hint">请尝试调整搜索条件或筛选选项</div></div></td></tr>';
+      renderPagination(0);
       return;
     }
 
-    tbody.innerHTML = filtered
+    renderPagination(filtered.length);
+
+    const start = (domainPage - 1) * domainPageSize;
+    const paged = filtered.slice(start, start + domainPageSize);
+
+    tbody.innerHTML = paged
       .map(
         (d) =>
           "<tr>" +
@@ -1254,6 +1339,9 @@
     cleanupInvalidDomains,
     syncDomains,
     filterDomains,
+    goToPage,
+    changePageSize,
+    toggleDomainMoreMenu,
     toggleSelectAllDomains,
     viewDomainDetail,
     saveDomainNameservers,
