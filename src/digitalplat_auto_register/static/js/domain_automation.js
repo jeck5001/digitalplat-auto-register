@@ -12,6 +12,7 @@
   };
 
   let activeTab = "domains";
+  let cloudflareOnlineZones = [];
 
   /* =============== Utilities =============== */
   function escapeHtml(str) {
@@ -302,13 +303,13 @@
   function renderStep(step) {
     const icon = step.status === "success" ? "✓" : step.status === "failed" ? "!" : "·";
     return (
-      '<div class="step ' + escapeHtml(step.status) + '">' +
-      '<div class="step-dot">' + icon + "</div>" +
-      '<div class="step-main">' +
-      '<div class="step-title">' + escapeHtml(step.label) + "</div>" +
-      (step.message ? '<div class="step-msg">' + escapeHtml(step.message) + "</div>" : "") +
-      "</div>" +
-      "</div>"
+      '<div class="domain-step-item">' +
+      '<div class="domain-step-dot ' + escapeHtml(step.status) + '">' + icon + '</div>' +
+      '<div class="domain-step-main">' +
+      '<div class="domain-step-title">' + escapeHtml(step.label) + '</div>' +
+      (step.message ? '<div class="domain-step-msg">' + escapeHtml(step.message) + '</div>' : '') +
+      '</div>' +
+      '</div>'
     );
   }
 
@@ -331,22 +332,22 @@
             const steps = (attempt.steps || []).map(renderStep).join("");
             return (
               '<div class="attempt-card" style="background:var(--bg-2);border:1px solid var(--line-1);border-radius:var(--r-2);padding:var(--s-3);margin-top:var(--s-2);">' +
-              '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:var(--s-2);">' +
-              '<strong class="mono" style="color:var(--ink-1);font-size:13px;">' + escapeHtml(attempt.candidate_domain) + "</strong>" +
+              '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:var(--s-2); flex-wrap:wrap; gap:var(--s-2);">' +
+              '<strong class="mono" style="color:var(--ink-1);font-size:13px;">' + escapeHtml(attempt.candidate_domain) + '</strong>' +
               statusBadge(attempt.status) +
-              "</div>" +
-              '<div class="stepper">' + steps + "</div>" +
-              (attempt.error ? '<div class="step-error" style="margin-top:var(--s-2);">' + escapeHtml(attempt.error) + "</div>" : "") +
-              "</div>"
+              '</div>' +
+              '<div class="domain-stepper">' + steps + '</div>' +
+              (attempt.error ? '<div class="step-error" style="margin-top:var(--s-2);">' + escapeHtml(attempt.error) + '</div>' : '') +
+              '</div>'
             );
           })
           .join("");
 
         return (
           '<div class="job-card" style="padding:var(--s-4);border-bottom:1px solid var(--line-1);">' +
-          '<div style="display:flex; justify-content:space-between; align-items:flex-start;">' +
+          '<div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:var(--s-2);">' +
           '<div>' +
-          '<div style="display:flex; align-items:center; gap:var(--s-2);">' +
+          '<div style="display:flex; align-items:center; gap:var(--s-2); flex-wrap:wrap;">' +
           '<span class="mono" style="font-weight:700;font-size:13px;">' + escapeHtml(job.id) + '</span>' +
           statusBadge(job.status) +
           '</div>' +
@@ -357,9 +358,9 @@
           '</div>' +
           '</div>' +
           '</div>' +
-          (job.error ? '<div class="step-error" style="margin-top:var(--s-2);">' + escapeHtml(job.error) + "</div>" : "") +
-          (attempts ? '<div class="attempts" style="margin-top:var(--s-3);">' + attempts + "</div>" : "") +
-          "</div>"
+          (job.error ? '<div class="step-error" style="margin-top:var(--s-2);">' + escapeHtml(job.error) + '</div>' : '') +
+          (attempts ? '<div class="attempts" style="margin-top:var(--s-3); max-height:480px; overflow-y:auto; padding-right:4px;">' + attempts + '</div>' : '') +
+          '</div>'
         );
       })
       .join("");
@@ -518,7 +519,7 @@
           "<td>" + renewalDetail(d) + "</td>" +
           '<td class="mono" style="font-size:11px">' + escapeHtml(formatTime(d.registered_at)) + "</td>" +
           '<td>' +
-          '<div style="display:flex; gap:4px; justify-content:flex-end; flex-wrap:wrap;">' +
+          '<div style="display:flex; gap:4px; justify-content:flex-end; flex-wrap:nowrap; min-width:175px;">' +
           '<button class="btn btn-ghost btn-sm" onclick="viewDomainDetail(\'' + escapeHtml(d.domain) + '\')" title="查看详情与编辑NS">详情</button>' +
           (d.cloudflare_status === "active"
             ? '<button class="btn btn-secondary btn-sm" onclick="refreshDomain(\'' + escapeHtml(d.domain) + '\')" title="检测CF真实状态">检测</button>'
@@ -560,6 +561,171 @@
       "</span>" +
       (rn.last_run_at ? '<span class="hint" style="margin-left:8px;">上次运行：' + formatTime(rn.last_run_at) + "</span>" : "") +
       (rn.last_error ? '<div style="color:var(--err);font-size:11px;margin-top:4px">' + escapeHtml(rn.last_error) + "</div>" : "");
+  }
+
+  /* =============== Cloudflare Online Zones Management =============== */
+  function openCloudflareZonesModal() {
+    const modal = document.getElementById("cf-zones-modal");
+    if (modal) modal.classList.add("active");
+    fetchCloudflareZones();
+  }
+
+  function closeCloudflareZonesModal() {
+    const modal = document.getElementById("cf-zones-modal");
+    if (modal) modal.classList.remove("active");
+  }
+
+  async function fetchCloudflareZones() {
+    const tbody = document.getElementById("cf-zones-table");
+    const countEl = document.getElementById("cf-zone-count");
+    if (tbody) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 25px;" class="hint"><i class="fa-solid fa-spinner fa-spin"></i> 正在从 Cloudflare 获取所有线上站点…</td></tr>';
+    }
+    if (countEl) countEl.textContent = "获取中…";
+
+    try {
+      const res = await api("/api/domain-automation/cloudflare/zones");
+      cloudflareOnlineZones = res.zones || [];
+      renderCloudflareZonesTable();
+    } catch (e) {
+      if (tbody) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 20px; color:var(--err);"><i class="fa-solid fa-circle-exclamation"></i> 获取失败: ' + escapeHtml(e.message) + '</td></tr>';
+      }
+      if (countEl) countEl.textContent = "获取失败";
+      showToast("获取 Cloudflare 站点失败: " + e.message, "error");
+    }
+  }
+
+  function getFilteredCloudflareZones() {
+    const query = (document.getElementById("cf-zone-search") ? document.getElementById("cf-zone-search").value : "").trim().toLowerCase();
+    const filterStatus = document.getElementById("cf-zone-filter-status") ? document.getElementById("cf-zone-filter-status").value : "";
+    let list = cloudflareOnlineZones.slice();
+
+    if (query) {
+      list = list.filter((z) => (z.name || "").toLowerCase().includes(query) || (z.id || "").toLowerCase().includes(query));
+    }
+
+    if (filterStatus) {
+      list = list.filter((z) => (z.status || "").toLowerCase() === filterStatus.toLowerCase());
+    }
+
+    return list;
+  }
+
+  function filterCloudflareZones() {
+    renderCloudflareZonesTable();
+  }
+
+  function renderCloudflareZonesTable() {
+    const tbody = document.getElementById("cf-zones-table");
+    const countEl = document.getElementById("cf-zone-count");
+    const selectAll = document.getElementById("cf-zone-select-all");
+    if (selectAll) selectAll.checked = false;
+
+    const filtered = getFilteredCloudflareZones();
+    if (countEl) {
+      countEl.textContent = "显示 " + filtered.length + " / 共 " + cloudflareOnlineZones.length + " 个站点";
+    }
+
+    if (!tbody) return;
+    if (!filtered.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 25px;" class="hint">暂无匹配的 Cloudflare 线上站点</td></tr>';
+      updateCfZonesSelectedCount();
+      return;
+    }
+
+    tbody.innerHTML = filtered
+      .map((z) => {
+        const isPending = z.status === "pending";
+        const statusHtml = isPending
+          ? '<span class="badge badge-warn"><i class="fa-solid fa-clock"></i> 名称服务器无效 (Pending)</span>'
+          : z.status === "active"
+          ? '<span class="badge badge-ok"><i class="fa-solid fa-circle-check"></i> 已激活 (Active)</span>'
+          : statusBadge(z.status);
+
+        return (
+          "<tr>" +
+          '<td><input type="checkbox" class="cf-zone-checkbox" value="' + escapeHtml(z.id) + '" data-name="' + escapeHtml(z.name) + '" onchange="updateCfZonesSelectedCount()"></td>' +
+          '<td><strong style="color:var(--ink-1); font-size:13px;">' + escapeHtml(z.name) + '</strong></td>' +
+          '<td>' + statusHtml + '</td>' +
+          '<td class="mono" style="font-size:11px; color:var(--ink-3);">' + escapeHtml(z.id) + '</td>' +
+          '<td class="mono" style="font-size:11px;">' + escapeHtml(formatTime(z.created_on)) + '</td>' +
+          "</tr>"
+        );
+      })
+      .join("");
+
+    updateCfZonesSelectedCount();
+  }
+
+  function toggleSelectAllCfZones() {
+    const checked = document.getElementById("cf-zone-select-all") ? document.getElementById("cf-zone-select-all").checked : false;
+    document.querySelectorAll(".cf-zone-checkbox").forEach((cb) => {
+      cb.checked = checked;
+    });
+    updateCfZonesSelectedCount();
+  }
+
+  function selectOnlyPendingZones() {
+    const filterSelect = document.getElementById("cf-zone-filter-status");
+    if (filterSelect) filterSelect.value = "pending";
+    renderCloudflareZonesTable();
+    document.querySelectorAll(".cf-zone-checkbox").forEach((cb) => {
+      cb.checked = true;
+    });
+    const selectAll = document.getElementById("cf-zone-select-all");
+    if (selectAll) selectAll.checked = true;
+    updateCfZonesSelectedCount();
+  }
+
+  function updateCfZonesSelectedCount() {
+    const selected = document.querySelectorAll(".cf-zone-checkbox:checked");
+    const countEl = document.getElementById("cf-zone-selected-count");
+    const btn = document.getElementById("btn-delete-cf-zones");
+    if (countEl) countEl.textContent = "已选中 " + selected.length + " 个站点";
+    if (btn) {
+      btn.disabled = selected.length === 0;
+      btn.innerHTML = '<i class="fa-solid fa-trash"></i> 一键从 Cloudflare 彻底删除选中 (' + selected.length + ' 个)';
+    }
+  }
+
+  function getSelectedCfZones() {
+    return Array.from(document.querySelectorAll(".cf-zone-checkbox:checked")).map((cb) => ({
+      id: cb.value,
+      name: cb.getAttribute("data-name") || cb.value,
+    }));
+  }
+
+  async function bulkDeleteCloudflareZones() {
+    const selected = getSelectedCfZones();
+    if (!selected.length) {
+      showToast("请先勾选要从 Cloudflare 删除的站点", "warn");
+      return;
+    }
+
+    const namesSample = selected.slice(0, 5).map((s) => s.name).join(", ") + (selected.length > 5 ? " 等" : "");
+    if (!window.confirm("⚠️ 危险操作确认 ⚠️\n\n确认直接从 Cloudflare 彻底删除选中的 " + selected.length + " 个站点/Zone？\n（包含: " + namesSample + "）\n\n删除后不可恢复！")) {
+      return;
+    }
+
+    const zoneIds = selected.map((s) => s.id);
+    const btn = document.getElementById("btn-delete-cf-zones");
+    if (btn) btn.disabled = true;
+
+    try {
+      showToast("正在从 Cloudflare 批量删除 " + zoneIds.length + " 个 Zone…", "info");
+      const res = await api("/api/domain-automation/cloudflare/zones/bulk-delete", {
+        method: "POST",
+        body: { zone_ids: zoneIds },
+      });
+      showToast("已成功从 Cloudflare 删除 " + res.deleted_count + " 个站点" + (res.failed_count ? "（" + res.failed_count + " 个失败）" : ""));
+      await fetchCloudflareZones();
+      await refresh();
+    } catch (e) {
+      showToast("批量删除 Cloudflare 站点失败: " + e.message, "error");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   }
 
   /* =============== Actions & Operations =============== */
@@ -1070,6 +1236,14 @@
     refreshDomain,
     bulkRefreshCloudflare,
     cleanupCloudflareDuplicates,
+    openCloudflareZonesModal,
+    closeCloudflareZonesModal,
+    fetchCloudflareZones,
+    filterCloudflareZones,
+    toggleSelectAllCfZones,
+    selectOnlyPendingZones,
+    updateCfZonesSelectedCount,
+    bulkDeleteCloudflareZones,
     showBulkNsModal,
     closeBulkNsModal,
     saveBulkNameservers,

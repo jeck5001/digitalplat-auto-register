@@ -55,6 +55,7 @@
         <div class="card-hint">支持搜索、筛选、CF状态检测、批量改NS、去重清理与导出</div>
       </div>
       <div style="display:flex; gap: var(--s-2); align-items: center; flex-wrap: wrap; justify-content: flex-end;">
+        <button class="btn btn-primary btn-sm" onclick="openCloudflareZonesModal()"><i class="fa-solid fa-broom"></i> CF 线上站点清理</button>
         <button class="btn btn-secondary btn-sm" onclick="syncDomains()"><i class="fa-solid fa-arrows-rotate"></i> 同步 DP</button>
         <button class="btn btn-secondary btn-sm" onclick="bulkRefreshCloudflare()"><i class="fa-solid fa-cloud"></i> 检测全部 CF 状态</button>
         <button class="btn btn-ghost btn-sm" onclick="cleanupCloudflareDuplicates()"><i class="fa-solid fa-wand-magic-sparkles"></i> 清理重复/失败托管</button>
@@ -108,7 +109,7 @@
               <th>Cloudflare 托管</th>
               <th>续期 / 到期时间</th>
               <th>注册时间</th>
-              <th style="width:160px; text-align:right;">操作</th>
+              <th style="min-width:180px; text-align:right;">操作</th>
             </tr>
           </thead>
           <tbody id="domain-table"></tbody>
@@ -295,9 +296,10 @@
             <input id="cf-token" type="password" placeholder="仅保存于服务端">
           </div>
         </div>
-        <div class="actions" style="display:flex; gap: var(--s-3); margin-top: var(--s-4);">
+        <div class="actions" style="display:flex; gap: var(--s-3); margin-top: var(--s-4); flex-wrap: wrap;">
           <button class="btn btn-primary" onclick="saveCloudflare()"><i class="fa-solid fa-floppy-disk"></i> 保存配置</button>
           <button class="btn btn-secondary" onclick="testCloudflare()"><i class="fa-solid fa-vial"></i> 测试连接</button>
+          <button class="btn btn-secondary" onclick="openCloudflareZonesModal()"><i class="fa-solid fa-broom"></i> 线上站点管理与清理</button>
           <button class="btn btn-danger" onclick="deleteCloudflare()">删除配置</button>
         </div>
         <div id="cloudflare-state" class="hint" style="margin-top: var(--s-4)">尚未配置</div>
@@ -399,6 +401,60 @@
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeBulkNsModal()">取消</button>
       <button class="btn btn-primary" onclick="saveBulkNameservers()">确认修改</button>
+    </div>
+  </div>
+</div>
+
+<!-- ======== Modal: Cloudflare Online Zones Management & Bulk Delete ======== -->
+<div class="modal-overlay" id="cf-zones-modal">
+  <div class="modal modal-wide" style="max-width: 900px;">
+    <div class="modal-head">
+      <div style="display:flex; align-items:center; justify-content:space-between; width:100%;">
+        <div>
+          <h3 class="modal-title"><i class="fa-solid fa-cloud" style="color:var(--info)"></i> Cloudflare 线上站点批量治理与清理</h3>
+          <div class="modal-sub">直接读取与操作 Cloudflare 账户下的线上 Zone，快速清除非活跃/失效站点</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="fetchCloudflareZones()"><i class="fa-solid fa-arrows-rotate"></i> 刷新列表</button>
+      </div>
+    </div>
+    <div class="modal-body" style="padding-top: 0;">
+      <div class="toolbar" style="margin-bottom: var(--s-3); gap: var(--s-2); flex-wrap: wrap;">
+        <input id="cf-zone-search" type="text" class="search-box" style="min-width: 220px;" placeholder="搜索线上站点名称（如 lossom）…" oninput="filterCloudflareZones()">
+        <select id="cf-zone-filter-status" onchange="filterCloudflareZones()">
+          <option value="">全部状态</option>
+          <option value="pending" selected>仅待生效 (Pending / 名称服务器无效)</option>
+          <option value="active">仅已激活 (Active)</option>
+        </select>
+        <button class="btn btn-secondary btn-sm" onclick="selectOnlyPendingZones()"><i class="fa-solid fa-check-double"></i> 仅勾选所有待生效</button>
+        <button class="btn btn-ghost btn-sm" onclick="toggleSelectAllCfZones()"><i class="fa-regular fa-square-check"></i> 全选/反选</button>
+        <span class="hint" id="cf-zone-count" style="margin-left: auto;">加载中…</span>
+      </div>
+
+      <div class="table-wrap" style="max-height: 400px; overflow-y: auto;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:36px;"><input type="checkbox" id="cf-zone-select-all" onchange="toggleSelectAllCfZones()"></th>
+              <th>站点 / 域名</th>
+              <th>Cloudflare 状态</th>
+              <th>Zone ID</th>
+              <th>创建时间</th>
+            </tr>
+          </thead>
+          <tbody id="cf-zones-table">
+            <tr><td colspan="5" style="text-align:center; padding: 20px;" class="hint">正在连接 Cloudflare API 获取线上站点列表…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-actions" style="justify-content: space-between;">
+      <div>
+        <span class="hint" id="cf-zone-selected-count">已选中 0 个站点</span>
+      </div>
+      <div style="display:flex; gap: var(--s-3);">
+        <button class="btn btn-ghost" onclick="closeCloudflareZonesModal()">关闭</button>
+        <button class="btn btn-danger" id="btn-delete-cf-zones" onclick="bulkDeleteCloudflareZones()"><i class="fa-solid fa-trash"></i> 一键从 Cloudflare 彻底删除选中</button>
+      </div>
     </div>
   </div>
 </div>

@@ -1286,6 +1286,30 @@ def create_app(
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
+    @app.get("/api/domain-automation/cloudflare/zones")
+    async def list_cloudflare_zones(
+        status: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        try:
+            return await domain_manager.list_cloudflare_zones(status=status, search=search)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+
+    @app.post("/api/domain-automation/cloudflare/zones/bulk-delete")
+    async def bulk_delete_cloudflare_zones(request: Dict[str, Any]) -> Dict[str, Any]:
+        zone_ids = request.get("zone_ids", [])
+        if not isinstance(zone_ids, list) or not zone_ids:
+            raise HTTPException(status_code=400, detail="zone_ids list is required")
+        try:
+            return await domain_manager.delete_cloudflare_zones(zone_ids)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(status_code=500, detail=str(error)) from error
+
     @app.put("/api/domain-automation/renewal")
     async def save_renewal_settings(request: Dict[str, Any]) -> Dict[str, Any]:
         try:

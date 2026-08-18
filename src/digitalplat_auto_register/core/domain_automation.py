@@ -214,6 +214,37 @@ class CloudflareClient:
             raise CloudflareAPIError("Cloudflare zone deletion returned an unexpected shape")
         return result
 
+    def list_all_zones(
+        self,
+        status: Optional[str] = None,
+        name_contains: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        page = 1
+        per_page = 50
+        all_zones = []
+        while True:
+            params: Dict[str, Any] = {
+                "account.id": self.account_id,
+                "per_page": per_page,
+                "page": page,
+            }
+            if status:
+                params["status"] = status
+            result = self._request("GET", "/zones", params=params)
+            if not isinstance(result, list) or not result:
+                break
+            for zone in result:
+                if isinstance(zone, dict):
+                    name = str(zone.get("name", ""))
+                    if not name_contains or name_contains.lower() in name.lower():
+                        all_zones.append(zone)
+            if len(result) < per_page:
+                break
+            page += 1
+            if page > 20:
+                break
+        return all_zones
+
 
 class DigitalPlatDomainClient:
     """Small client for the documented DigitalPlat Domains API."""
@@ -1590,6 +1621,49 @@ class DomainAutomationManager:
             "refreshed_count": refreshed,
             "active_count": active_count,
             "pending_count": pending_count,
+            "failed_count": len(errors),
+            "errors": errors,
+        }
+
+    async def list_cloudflare_zones(
+        self,
+        status: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not self.store.cloudflare or not self.store.cloudflare.enabled:
+            raise ValueError("Cloudflare configuration is missing or disabled")
+        client = self._cloudflare_client()
+        zones = await _run_sync(client.list_all_zones, status, search)
+        return {
+            "total": len(zones),
+            "zones": [
+                {
+                    "id": z.get("id"),
+                    "name": z.get("name"),
+                    "status": z.get("status"),
+                    "created_on": z.get("created_on"),
+                    "name_servers": z.get("name_servers", []),
+                }
+                for z in zones
+            ],
+        }
+
+    async def delete_cloudflare_zones(self, zone_ids: List[str]) -> Dict[str, Any]:
+        if not self.store.cloudflare or not self.store.cloudflare.enabled:
+            raise ValueError("Cloudflare configuration is missing or disabled")
+        client = self._cloudflare_client()
+        deleted = 0
+        errors = []
+        for zid in zone_ids:
+            if not zid:
+                continue
+            try:
+                await _run_sync(client.delete_zone, str(zid))
+                deleted += 1
+            except Exception as error:
+                errors.append({"zone_id": zid, "error": str(error)})
+        return {
+            "deleted_count": deleted,
             "failed_count": len(errors),
             "errors": errors,
         }
