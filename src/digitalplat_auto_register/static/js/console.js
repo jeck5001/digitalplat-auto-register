@@ -164,6 +164,17 @@
     if (activeBatch) {
       activeSection.style.display = "block";
       const pct = Math.round((activeBatch.completed_accounts / activeBatch.total_accounts) * 100) || 0;
+      const delayMin = activeBatch.delay_min_seconds !== undefined && activeBatch.delay_min_seconds !== null
+        ? activeBatch.delay_min_seconds
+        : (activeBatch.delay_between_registrations !== undefined ? activeBatch.delay_between_registrations : 15);
+      const delayMax = activeBatch.delay_max_seconds !== undefined && activeBatch.delay_max_seconds !== null
+        ? activeBatch.delay_max_seconds
+        : delayMin;
+      const delayText = delayMin === delayMax ? delayMin + "s" : delayMin + "s ~ " + delayMax + "s";
+      const prefixText = activeBatch.username_prefix || "自动生成";
+      const referralText = activeBatch.referral_code || "默认";
+      const concurrentText = activeBatch.max_concurrent || 1;
+
       document.getElementById("active-batch-info").innerHTML =
         '<div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:16px">' +
         '<div><div class="hint" style="margin-bottom:4px">任务 ID</div><code>' + escapeHtml(activeBatch.id) + "</code></div>" +
@@ -171,7 +182,13 @@
         "</div>" +
         '<div style="margin-bottom:8px"><strong>整体进度：</strong>' + activeBatch.completed_accounts + " / " + activeBatch.total_accounts + "</div>" +
         '<div class="progress progress-lg"><div class="progress-fill" style="width:' + pct + '%"></div></div>' +
-        '<div class="hint" style="margin-top:8px">' + pct + "% · 成功 " + activeBatch.successful_accounts + " · 失败 " + activeBatch.failed_accounts + "</div>";
+        '<div class="hint" style="margin-top:8px">' + pct + "% · 成功 " + activeBatch.successful_accounts + " · 失败 " + activeBatch.failed_accounts + "</div>" +
+        '<div class="active-batch-meta">' +
+        '<span><strong>邀请码:</strong> <code>' + escapeHtml(referralText) + '</code></span>' +
+        '<span><strong>前缀:</strong> <code>' + escapeHtml(prefixText) + '</code></span>' +
+        '<span><strong>间隔:</strong> ' + escapeHtml(delayText) + '</span>' +
+        '<span><strong>并发:</strong> ' + escapeHtml(concurrentText) + '</span>' +
+        '</div>';
     } else {
       activeSection.style.display = "none";
     }
@@ -262,6 +279,48 @@
     );
   }
 
+  /* =============== Batch Configuration Box =============== */
+  function batchConfigHtml(data) {
+    const delayMin = data.delay_min_seconds !== undefined && data.delay_min_seconds !== null
+      ? data.delay_min_seconds
+      : (data.delay_between_registrations !== undefined ? data.delay_between_registrations : 15);
+    const delayMax = data.delay_max_seconds !== undefined && data.delay_max_seconds !== null
+      ? data.delay_max_seconds
+      : delayMin;
+    const delayText = delayMin === delayMax ? delayMin + " 秒" : delayMin + " ~ " + delayMax + " 秒";
+    const prefixText = data.username_prefix ? data.username_prefix : "留空（自动生成）";
+    const concurrentText = data.max_concurrent === 1 ? "1（推荐串行）" : String(data.max_concurrent);
+    const referralText = data.referral_code || "4qn8iw8r1o";
+    const countText = (data.total_accounts || (data.account_ids ? data.account_ids.length : 0)) + " 个";
+
+    const meta = data.metadata || {};
+    let turnstileHtml = "";
+    if (meta.turnstile_sitekey || meta.turnstile_endpoint) {
+      turnstileHtml =
+        '<div class="config-item"><div class="config-item-label">Turnstile Site Key</div><div class="config-item-value mono">' +
+        escapeHtml(meta.turnstile_sitekey || "使用默认环境变量") +
+        '</div></div>' +
+        '<div class="config-item"><div class="config-item-label">Solver Endpoint</div><div class="config-item-value mono">' +
+        escapeHtml(meta.turnstile_endpoint || "使用默认环境变量") +
+        '</div></div>';
+    }
+
+    return (
+      '<div class="batch-config-box">' +
+      '<div class="batch-config-box-title"><i class="fa-solid fa-sliders" style="color:var(--accent)"></i> 任务详细配置</div>' +
+      '<div class="batch-config-grid">' +
+      '<div class="config-item"><div class="config-item-label">注册数量</div><div class="config-item-value">' + escapeHtml(countText) + '</div></div>' +
+      '<div class="config-item"><div class="config-item-label">邀请码</div><div class="config-item-value mono">' + escapeHtml(referralText) + '</div></div>' +
+      '<div class="config-item"><div class="config-item-label">用户名前缀</div><div class="config-item-value mono">' + escapeHtml(prefixText) + '</div></div>' +
+      '<div class="config-item"><div class="config-item-label">最小 ~ 最大间隔</div><div class="config-item-value">' + escapeHtml(delayText) + '</div></div>' +
+      '<div class="config-item"><div class="config-item-label">并发数</div><div class="config-item-value">' + escapeHtml(concurrentText) + '</div></div>' +
+      '<div class="config-item"><div class="config-item-label">创建时间</div><div class="config-item-value mono">' + escapeHtml(formatTime(data.created_at) || "-") + '</div></div>' +
+      turnstileHtml +
+      '</div>' +
+      '</div>'
+    );
+  }
+
   /* =============== Batch modal =============== */
   async function viewBatch(batchId) {
     const modal = document.getElementById("account-detail-modal");
@@ -280,7 +339,7 @@
             .join("")
         : '<div class="empty"><div class="empty-icon">—</div><div class="empty-title">无账号</div></div>';
       const pct = progressPercent(data);
-      document.getElementById("detail-modal-title").textContent = "批量任务进度";
+      document.getElementById("detail-modal-title").textContent = "批量注册任务详情";
       document.getElementById("account-detail-content").innerHTML =
         '<div class="batch-summary">' +
         '<div><div class="summary-label">任务 ID</div><div class="summary-value task-id">' + escapeHtml(data.id) + "</div></div>" +
@@ -289,6 +348,7 @@
         '<div><div class="summary-label">成功</div><div class="summary-value ok">' + data.successful_accounts + "</div></div>" +
         '<div><div class="summary-label">失败</div><div class="summary-value err">' + data.failed_accounts + "</div></div>" +
         "</div>" +
+        batchConfigHtml(data) +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><strong>账号注册明细</strong>' + statusBadge(data.status) + "</div>" +
         (data.error ? '<div class="step-error">' + escapeHtml(data.error) + "</div>" : "") +
         "<div>" + accountsHtml + "</div>";

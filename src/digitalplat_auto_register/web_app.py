@@ -279,6 +279,7 @@ class RegistrationManager:
                 delay_min_seconds=delay,
                 delay_max_seconds=delay_max,
                 max_concurrent=max_concurrent,
+                username_prefix=username_prefix,
             )
             self._account_store.create_batch_job(batch_job)
 
