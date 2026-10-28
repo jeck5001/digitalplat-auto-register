@@ -141,5 +141,97 @@ def test_retry_recreates_auto_email_when_mailbox_session_was_cleaned(monkeypatch
     assert profile.email == "fresh@qabq.com"
 
 
+def _stub_workflow(monkeypatch, registrar, form_result):
+    """Drive the workflow to the form step with everything else stubbed."""
+
+    async def no_op():
+        return None
+
+    monkeypatch.setattr(registrar, "_initialize_services", no_op)
+    monkeypatch.setattr(registrar, "_cleanup_services", no_op)
+    monkeypatch.setattr(
+        registrar,
+        "_acquire_turnstile_token",
+        lambda: _async_result(TurnstileResult(success=True, token="token")),
+    )
+    monkeypatch.setattr(
+        registrar,
+        "_create_temporary_email",
+        lambda: _async_result(EmailResult(success=True, email="fresh@qabq.com", provider="mail.td")),
+    )
+    monkeypatch.setattr(
+        registrar,
+        "_navigate_to_registration",
+        lambda referral_code: _async_result(
+            BrowserResult(success=True, url="https://example.test/register")
+        ),
+    )
+    monkeypatch.setattr(
+        registrar,
+        "_fill_and_submit_form",
+        lambda user_profile, token: _async_result(form_result),
+    )
+
+
+def _profile(registrar):
+    return registrar._prepare_user_profile(
+        username="diag-user",
+        email="diag@qabq.com",
+        fullname="Diag User",
+        phone="+1-555-555-5555",
+        password="DiagPass1!",
+        address_line1="1 Diag Street",
+        address_line2=None,
+        city="Austin",
+        state="TX",
+        postal_code="78701",
+        country="US",
+    )
+
+
+def test_form_submission_failure_keeps_browser_reason(monkeypatch):
+    """The job log must show why submission failed, not a fixed sentence.
+
+    Filling and submitting fail for very different causes, and collapsing
+    them into one message made every past failure undiagnosable.
+    """
+    registrar = DigitalPlatRegistrar(DigitalPlatConfig())
+    registrar.registration_result = RegistrationResult(
+        success=False,
+        registration_status=RegistrationStatus.PENDING,
+    )
+    reason = (
+        "Failed to fill registration form: Browser Automation Error: "
+        "Required field address_line1 could not be filled"
+    )
+    _stub_workflow(monkeypatch, registrar, BrowserResult(success=False, error=reason))
+
+    result = asyncio.run(
+        registrar._execute_registration_workflow(_profile(registrar), "ref", None)
+    )
+
+    assert result.success is False
+    assert result.error_stage == "form_submission"
+    assert reason in result.error
+
+
+def test_form_submission_failure_without_reason_still_reports_stage(monkeypatch):
+    """A bare failure must not produce an empty error message."""
+    registrar = DigitalPlatRegistrar(DigitalPlatConfig())
+    registrar.registration_result = RegistrationResult(
+        success=False,
+        registration_status=RegistrationStatus.PENDING,
+    )
+    _stub_workflow(monkeypatch, registrar, BrowserResult(success=False))
+
+    result = asyncio.run(
+        registrar._execute_registration_workflow(_profile(registrar), "ref", None)
+    )
+
+    assert result.success is False
+    assert result.error_stage == "form_submission"
+    assert "Failed to submit registration form" in result.error
+
+
 async def _async_result(value):
     return value

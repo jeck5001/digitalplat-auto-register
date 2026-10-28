@@ -277,7 +277,15 @@ class DigitalPlatRegistrar:
             browser_form_result = await self._fill_and_submit_form(user_profile, turnstile_result.token)
 
             if not browser_form_result.success:
-                raise RegistrationError("Failed to submit registration form", "form_submission")
+                # Carry the browser layer's reason instead of replacing it
+                # with a fixed sentence. Filling and submitting fail for very
+                # different causes (a missing field, a disabled button, an
+                # HTTP 4xx, no verification popup), and the generic message
+                # made every one of them indistinguishable in the job log.
+                raise RegistrationError(
+                    browser_form_result.error or "Failed to submit registration form",
+                    "form_submission",
+                )
 
             self._add_step_result("form_submission", StepResult(
                 name="form_submission",
@@ -348,7 +356,11 @@ class DigitalPlatRegistrar:
             duration = time.time() - self.registration_result.start_time.timestamp()
             logger.error(f"Registration workflow failed: {str(e)}")
 
-            return self.registration_result.mark_failed(str(e), "workflow_execution")
+            # RegistrationError already carries the failing stage; keep it so
+            # the console marks the step that actually broke instead of
+            # blaming the whole workflow.
+            stage = getattr(e, "stage", None) or "workflow_execution"
+            return self.registration_result.mark_failed(str(e), stage)
 
         finally:
             # Always clean up services
