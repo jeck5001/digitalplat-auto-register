@@ -567,7 +567,20 @@ class DigitalPlatRegistrar:
             fullname = f"{random.choice(_DEFAULT_FIRST_NAMES)} {random.choice(_DEFAULT_LAST_NAMES)}"
 
         if not phone:
-            phone = f"+1-555-{random.randint(100, 999)}-{random.randint(1000, 9999)}"
+            # 555 is a fictional/reserved NANP range and the server
+            # rejects it as an invalid phone number. Generate a
+            # structurally valid US number instead: area and exchange
+            # codes start with 2-9 and are never 555.
+            def _nanp_block() -> int:
+                block = random.randint(200, 999)
+                while block == 555:
+                    block = random.randint(200, 999)
+                return block
+
+            phone = (
+                f"+1-{_nanp_block()}-{_nanp_block()}-"
+                f"{random.randint(1000, 9999)}"
+            )
 
         if not country:
             country = "US"

@@ -218,20 +218,26 @@ class BrowserAutomationService:
         try:
             logger.info("Filling registration form...")
             
-            # Define form fields
+            # Define form fields. Selectors use the form's stable `name`
+            # attributes, not visible labels or placeholders: the current
+            # registration page is localised, its address inputs carry no
+            # placeholder at all, and the address fields are named
+            # contact_* (e.g. contact_line1, contact_region,
+            # contact_country), not the old English placeholders.
             form_fields = [
                 FormField("username", "input[name='username']", "text", placeholder="Username"),
                 FormField("email", "input[name='email']", "email", placeholder="Email Address"),
                 FormField("fullname", "input[name='fullname']", "text", placeholder="Full Name"),
+                FormField("phone_country", "select[name='phone_country']", "select"),
                 FormField("phone", "input[name='phone']", "tel", placeholder="Phone Number"),
                 FormField("password", "input[name='password']", "password", placeholder="Password"),
-                FormField("referral_code", "input[name*='referral']", "text", required=False),
-                FormField("address_line1", "input[placeholder='Address Line 1']", "text"),
-                FormField("address_line2", "input[placeholder='Address Line 2 (optional)']", "text", required=False),
-                FormField("city", "input[placeholder='City']", "text"),
-                FormField("state", "input[placeholder='State / Province / Region']", "text"),
-                FormField("postal_code", "input[placeholder='Postal Code']", "text"),
-                FormField("country", "select", "select"),
+                FormField("referral_code", "input[name='referral_code']", "text", required=False),
+                FormField("address_line1", "input[name='contact_line1']", "text"),
+                FormField("address_line2", "input[name='contact_line2']", "text", required=False),
+                FormField("city", "input[name='contact_city']", "text"),
+                FormField("state", "input[name='contact_region']", "text"),
+                FormField("postal_code", "input[name='contact_postal_code']", "text"),
+                FormField("country", "select[name='contact_country']", "select"),
             ]
             
             # Fill each field
@@ -288,9 +294,15 @@ class BrowserAutomationService:
         try:
             logger.info("Submitting registration form...")
             
-            # Look for submit button
+            # Look for submit button. The form has a single button, so
+            # prefer it by position over its localised text: the current
+            # page renders "Register" in English and "注册" in Chinese,
+            # and a text-only lookup breaks on the other locale.
             submit_selectors = [
+                "form button[type='submit']",
+                "form button",
                 "button[type='submit']",
+                "button:has-text('注册')",
                 "button:has-text('Register')",
                 "button:has-text('Sign Up')",
                 "button:has-text('Create Account')",
@@ -307,10 +319,22 @@ class BrowserAutomationService:
             if not submit_button:
                 raise BrowserAutomationError("No submit button found")
             
+            # The button is disabled until the Turnstile token lands in
+            # React state, which can lag the injection by a moment. Poll
+            # briefly before declaring the submit dead, and if it never
+            # enables, report which fields are actually invalid instead
+            # of the old generic message.
+            for _ in range(10):
+                if await submit_button.is_enabled():
+                    break
+                await asyncio.sleep(0.5)
+
             if not await submit_button.is_enabled():
+                diagnostics = await self._get_form_diagnostics()
+                detail = f" ({diagnostics})" if diagnostics else ""
                 raise BrowserAutomationError(
                     "Registration submit button is disabled after form filling; "
-                    "verify the contact fields and Turnstile token"
+                    "verify the contact fields and Turnstile token" + detail
                 )
 
             current_origin = urlparse(self.page.url)
@@ -509,9 +533,25 @@ class BrowserAutomationService:
             "state": user_profile.state,
             "postal_code": user_profile.postal_code,
             "country": user_profile.country,
+            # The phone country dropdown is a separate control from the
+            # phone input; it takes the same country as the address.
+            "phone_country": user_profile.country,
         }
         
         value = field_value_map.get(field.name, "")
+
+        if field.name == "phone" and value:
+            # The phone input is a *national* number field: the country
+            # calling code is sent separately via phone_country. Filling
+            # a full "+1-..." value here is what the server rejects as
+            # an invalid phone number, so strip it down to digits and
+            # drop a leading US country code (1) if present.
+            import re as _re
+
+            digits = _re.sub(r"\D", "", value)
+            if len(digits) == 11 and digits.startswith("1"):
+                digits = digits[1:]
+            value = digits
         
         if not value and field.required:
             raise BrowserAutomationError(f"Required value missing for field: {field.name}")
@@ -550,11 +590,18 @@ class BrowserAutomationService:
                         logger.debug(f"Optional field {field.name} not found, skipping")
 
     async def _use_whois_address_for_billing(self) -> None:
-        """Check the form option that reuses WHOIS data for billing."""
-        selector = "label:has-text('Billing address is the same as WHOIS') input[type='checkbox']"
-        checkbox = self.page.locator(selector)
+        """Check the form option that reuses WHOIS data for billing.
+
+        The checkbox is named billing_same and is checked by default on
+        the current page; match it by name, not by its localised label
+        text (the old English label no longer exists). If the control
+        is gone, do not fail the whole registration: the form then
+        simply has no separate billing address to reuse.
+        """
+        checkbox = self.page.locator("input[name='billing_same']")
         if await checkbox.count() == 0:
-            raise BrowserAutomationError("Billing address confirmation checkbox not found")
+            logger.warning("Billing address checkbox not found; continuing without it")
+            return
 
         checkbox = checkbox.first
         if not await checkbox.is_checked():
@@ -630,6 +677,11 @@ class BrowserAutomationService:
                     window.cf_turnstile_response = token;
 
                     const callbackNames = [
+                        // The current registration page passes the token
+                        // to its form state via onTokenChange; without it
+                        // the submit button stays disabled even though the
+                        // hidden response input was filled.
+                        "onTokenChange",
                         "onSuccess",
                         "onVerify",
                         "onToken",
@@ -767,6 +819,17 @@ class BrowserAutomationService:
                 f"(response inputs: {injection_result['responseInputCount']}, "
                 f"React callback: {injection_result['reactCallbackName'] or 'none'})"
             )
+            if not injection_result.get("reactCallbackInvoked"):
+                # The submit button is disabled until the page's React
+                # state holds a token, so a missed callback is the most
+                # likely reason a later submit fails. Surface it here
+                # instead of letting it surface as a generic disabled
+                # button error in the submit step.
+                logger.warning(
+                    "Turnstile token was written to the hidden input but "
+                    "no React token callback was invoked; the submit "
+                    "button may stay disabled"
+                )
             
         except Exception as e:
             logger.warning(f"Error injecting Turnstile token: {str(e)}")
@@ -835,6 +898,40 @@ class BrowserAutomationService:
             except Exception:
                 continue
         return " | ".join(dict.fromkeys(messages))[:500]
+
+    async def _get_form_diagnostics(self) -> str:
+        """List form fields that fail native validation, by name only.
+
+        Used when the submit button never enables: it tells the next
+        run (and the job log) whether the blocker is an empty/invalid
+        field or the Turnstile token, without logging field values.
+        """
+        try:
+            return await self.page.evaluate(
+                """
+                () => {
+                    const form = document.querySelector("form");
+                    if (!form) return "";
+                    const problems = [];
+                    for (const el of form.querySelectorAll("input, select")) {
+                        if (el.type === "hidden") continue;
+                        if (el.name === "cf-turnstile-response") continue;
+                        if (!el.checkValidity()) {
+                            problems.push(el.name || el.id || el.type);
+                        }
+                    }
+                    const turnstile = document.querySelector(
+                        "input[name='cf-turnstile-response']"
+                    );
+                    if (!turnstile || !turnstile.value) {
+                        problems.push("turnstile-token-missing");
+                    }
+                    return problems.join(", ");
+                }
+                """
+            )
+        except Exception:
+            return ""
 
     async def _get_response_error_text(self, response) -> str:
         """Extract a non-sensitive error message from a registration response."""

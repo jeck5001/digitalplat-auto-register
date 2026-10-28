@@ -94,9 +94,23 @@ def _timestamp() -> str:
 
 
 def _generate_phone_number() -> str:
-    """Return the API-required +<calling-code>-<digits> format."""
-    subscriber_number = 2_000_000_000 + secrets.randbelow(8_000_000_000)
-    return f"+1-{subscriber_number:010d}"
+    """Return the API-required +<calling-code>-<digits> format.
+
+    Keep the +1-XXXXXXXXXX shape, but make the 10 digits a
+    structurally valid NANP number: the area and exchange blocks
+    start with 2-9 and are never 555, otherwise the server rejects
+    the number as invalid even though the shape looks right.
+    """
+    def _block() -> int:
+        block = 200 + secrets.randbelow(800)
+        while block == 555:
+            block = 200 + secrets.randbelow(800)
+        return block
+
+    area = _block()
+    exchange = _block()
+    line = secrets.randbelow(10_000)
+    return f"+1-{area}{exchange}{line:04d}"
 
 
 def _generate_username() -> str:
