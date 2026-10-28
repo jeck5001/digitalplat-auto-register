@@ -40,13 +40,14 @@ RUN pip install --no-cache-dir --no-deps . \
     && chown -R app:app /app /home/app \
     && chmod 0755 /usr/local/bin/docker-entrypoint
 
-USER app
-
-# 4. 下载 Camoufox 浏览器并立即清除下载压缩包源文件
+# 4. 下载 Camoufox 浏览器并立即清除下载压缩包源文件。
+# camoufox 依赖 fpgen，而 fpgen 把模型写进 site-packages/fpgen/data：
+# 该目录随 pip 安装属 root，所以在 USER app 下 fetch 会报
+# "cannot read or write fpgen's model file"。浏览器缓存仍要落在 app 的
+# HOME 下，因此这里以 root 下载，再把缓存目录整体归还给 app。
 RUN camoufox fetch \
-    && find /home/app/.cache -type f \( -name "*.zip" -o -name "*.tar.*" -o -name "*.gz" -o -name "*.xz" \) -delete
-
-USER root
+    && find /home/app/.cache -type f \( -name "*.zip" -o -name "*.tar.*" -o -name "*.gz" -o -name "*.xz" \) -delete \
+    && chown -R app:app /home/app/.cache /usr/local/lib/python3.12/site-packages/fpgen/data
 
 # 5. 清理全局临时文件与缓存
 RUN rm -rf /tmp/* /var/tmp/* /root/.cache
