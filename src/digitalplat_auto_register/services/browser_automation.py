@@ -39,6 +39,151 @@ class FormField:
     value: str = ""
 
 
+_INJECT_MAIN_WORLD_SOURCE = r"""
+async function (token) {
+    // Runs inside the page's own world, where React's expando keys and
+    // window.turnstile actually exist.
+
+    const result = {
+        responseInputCount: 0,
+        reactCallbackName: null,
+        stateIndex: null,
+        buttonDisabled: null,
+    };
+
+    const fiberKeyOf = (element) =>
+        Object.keys(element).find((key) => key.indexOf("__reactFiber$") === 0);
+
+    const findButton = () =>
+        [...document.querySelectorAll("button")].find(
+            (button) => (button.innerText || "").trim() === "Register"
+        );
+
+    // 1. Fill the hidden response input the way a real widget would.
+    const responseInputs = [
+        ...document.querySelectorAll(
+            "input[data-cf-turnstile], input[name='cf-turnstile-response']"
+        ),
+    ];
+    result.responseInputCount = responseInputs.length;
+    for (const input of responseInputs) {
+        const setter = Object.getOwnPropertyDescriptor(
+            HTMLInputElement.prototype,
+            "value"
+        ).set;
+        if (setter) {
+            setter.call(input, token);
+        } else {
+            input.value = token;
+        }
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    window.cf_turnstile_response = token;
+
+    // 2. Locate the component that owns the form: the nearest fiber with a
+    //    substantial hook chain.
+    const form = document.querySelector("form");
+    const formKey = form ? fiberKeyOf(form) : null;
+    let owner = null;
+    if (formKey) {
+        let fiber = form[formKey];
+        for (let depth = 0; fiber && depth < 24; depth += 1) {
+            let hookCount = 0;
+            for (let hook = fiber.memoizedState; hook && hookCount < 80; hook = hook.next) {
+                hookCount += 1;
+            }
+            if (hookCount >= 20) {
+                owner = fiber;
+                break;
+            }
+            fiber = fiber.return;
+        }
+    }
+
+    // 3. Prefer a real token callback prop if the page exposes one.
+    const callbackNames = [
+        "onTokenChange", "onSuccess", "onVerify", "onToken", "onChange",
+    ];
+    if (owner) {
+        let fiber = owner;
+        for (let depth = 0; fiber && depth < 40; depth += 1) {
+            const props = fiber.memoizedProps;
+            if (props && typeof props === "object") {
+                const name = callbackNames.find(
+                    (candidate) => typeof props[candidate] === "function"
+                );
+                if (name) {
+                    try {
+                        props[name](token);
+                        result.reactCallbackName = name;
+                    } catch (error) {
+                        result.reactCallbackName = null;
+                    }
+                }
+            }
+            if (result.reactCallbackName) {
+                break;
+            }
+            fiber = fiber.return;
+        }
+    }
+
+    // 4. Otherwise dispatch into the state slot that gates the submit button.
+    //    The page keeps the token in a useState whose value is "" until the
+    //    widget succeeds, but several other states are empty strings too, and
+    //    which index holds the token changes when the page is rebuilt. So try
+    //    every empty string slot and keep the one that actually enables the
+    //    button, restoring the others as we go.
+    if (!result.reactCallbackName && owner) {
+        const candidates = [];
+        let index = 0;
+        for (let hook = owner.memoizedState; hook; hook = hook.next, index += 1) {
+            const state = hook.memoizedState;
+            if (typeof hook.queue?.dispatch !== "function") {
+                continue;
+            }
+            if (typeof state !== "string" || state.length !== 0) {
+                continue;
+            }
+            candidates.push({ index: index, hook: hook });
+        }
+        result.candidates = candidates.map((c) => c.index);
+
+        for (const candidate of candidates) {
+            try {
+                candidate.hook.queue.dispatch(token);
+            } catch (error) {
+                continue;
+            }
+            // React commits asynchronously; read the button on the next tick.
+            const enabled = await new Promise((resolve) => {
+                setTimeout(() => {
+                    const button = findButton();
+                    resolve(button ? !button.disabled : false);
+                }, 60);
+            });
+            if (enabled) {
+                result.stateIndex = candidate.index;
+                result.reactCallbackName = "state-dispatch";
+                break;
+            }
+            // Not the token slot: put it back the way it was.
+            try {
+                candidate.hook.queue.dispatch("");
+            } catch (error) {
+                // Leaving it set is harmless if it is not the gate.
+            }
+        }
+    }
+
+    const button = findButton();
+    result.buttonDisabled = button ? button.disabled : null;
+    document.documentElement.setAttribute("data-dsh-inject", JSON.stringify(result));
+}
+"""
+
+
 class BrowserAutomationService:
     """
     Playwright-based browser automation service for DigitalPlat registration
@@ -645,196 +790,73 @@ class BrowserAutomationService:
         return selector_map.get(field_name, [])
     
     async def _inject_turnstile_token(self, token: str) -> None:
-        """Inject Turnstile token into the page"""
+        """Inject the Turnstile token into the page's own React state.
+
+        Two things make this harder than writing the hidden input:
+
+        1. ``page.evaluate`` runs in an isolated world. ``window.turnstile``,
+           ``window.__next_f`` and React's ``__reactFiber$`` expando keys are
+           invisible there, so every fiber walk started from evaluate finds
+           nothing. The work has to happen inside the page's own world.
+        2. The form keeps the token in component state and leaves its submit
+           button disabled until that state holds a token, so filling only
+           ``input[name='cf-turnstile-response']`` is not enough.
+
+        The routine below runs as a <script> element (the page's world), fills
+        the hidden input, then dispatches the token into the owning component's
+        empty-string state slot and reports the outcome through a DOM
+        attribute, which both worlds can read.
+        """
         try:
-            response_selector = "input[name='cf-turnstile-response']"
-            await self.page.locator(response_selector).wait_for(
+            await self.page.locator("input[name='cf-turnstile-response']").wait_for(
                 state="attached",
                 timeout=min(self.browser_config.timeout, 15000),
             )
+
             injection_result = await self.page.evaluate(
                 """
-                (token) => {
-                    const setInputValue = (input) => {
-                        const setter = Object.getOwnPropertyDescriptor(
-                            HTMLInputElement.prototype, "value"
-                        )?.set;
-                        if (setter) {
-                            setter.call(input, token);
-                        } else {
-                            input.value = token;
-                        }
-                        input.dispatchEvent(new Event("input", { bubbles: true }));
-                        input.dispatchEvent(new Event("change", { bubbles: true }));
-                    };
+                async ({ token, source }) => {
+                    document.documentElement.removeAttribute("data-dsh-inject");
 
-                    const responseInputs = [
-                        ...document.querySelectorAll(
-                            "input[data-cf-turnstile], input[name='cf-turnstile-response']"
-                        ),
-                    ];
-                    responseInputs.forEach(setInputValue);
-                    window.cf_turnstile_response = token;
+                    // A <script> element is the only path into the page's own
+                    // world; evaluate itself runs isolated from it.
+                    const script = document.createElement("script");
+                    script.textContent =
+                        "(" + source + ")(" + JSON.stringify(token) + ");";
+                    document.head.appendChild(script);
+                    script.remove();
 
-                    const callbackNames = [
-                        // The current registration page passes the token
-                        // to its form state via onTokenChange; without it
-                        // the submit button stays disabled even though the
-                        // hidden response input was filled.
-                        "onTokenChange",
-                        "onSuccess",
-                        "onVerify",
-                        "onToken",
-                        "onChange",
-                        "callback",
-                    ];
-                    // The registration page keeps the token in React state.
-                    // Prefer the mounted Turnstile callback over only mutating
-                    // the hidden response input.
-                    let reactCallbackInvoked = false;
-                    let reactCallbackName = null;
-                    const invokeReactCallback = (props) => {
-                        if (!props || !(props.siteKey || props.sitekey)) {
-                            return false;
-                        }
-                        const callbackName = callbackNames.find((name) =>
-                            typeof props[name] === "function"
+                    // The page-world routine is async, so wait for it to
+                    // publish its report instead of reading immediately.
+                    const deadline = Date.now() + 5000;
+                    while (Date.now() < deadline) {
+                        const raw = document.documentElement.getAttribute(
+                            "data-dsh-inject"
                         );
-                        if (!callbackName) {
-                            return false;
+                        if (raw) {
+                            return JSON.parse(raw);
                         }
-                        props[callbackName](token);
-                        reactCallbackName = callbackName;
-                        return true;
-                    };
-                    for (const input of responseInputs) {
-                        for (let element = input; element && !reactCallbackInvoked; element = element.parentElement) {
-                            const fiberKey = Object.keys(element).find((key) =>
-                                key.startsWith("__reactFiber$")
-                            );
-                            let fiber = fiberKey ? element[fiberKey] : null;
-                            for (let depth = 0; fiber && depth < 100; depth += 1, fiber = fiber.return) {
-                                const props = fiber.memoizedProps;
-                                if (invokeReactCallback(props)) {
-                                    reactCallbackInvoked = true;
-                                    break;
-                                }
-                            }
-                        }
+                        await new Promise((resolve) => setTimeout(resolve, 50));
                     }
-
-                    if (!reactCallbackInvoked) {
-                        const roots = new Set();
-                        const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
-                        if (hook?.renderers && typeof hook.getFiberRoots === "function") {
-                            for (const rendererId of hook.renderers.keys()) {
-                                for (const root of hook.getFiberRoots(rendererId)) {
-                                    roots.add(root.current || root);
-                                }
-                            }
-                        }
-                        for (const element of document.querySelectorAll("*")) {
-                            const fiberKey = Object.keys(element).find((key) =>
-                                key.startsWith("__reactFiber$")
-                            );
-                            let fiber = fiberKey ? element[fiberKey] : null;
-                            while (fiber?.return) {
-                                fiber = fiber.return;
-                            }
-                            if (fiber) {
-                                roots.add(fiber);
-                            }
-                        }
-
-                        const visited = new Set();
-                        const invokeRegistrationStateSetter = (fiber) => {
-                            const hooks = [];
-                            for (
-                                let hook = fiber.memoizedState;
-                                hook && hooks.length < 40;
-                                hook = hook.next
-                            ) {
-                                hooks.push(hook);
-                            }
-                            for (let start = 0; start <= hooks.length - 10; start += 1) {
-                                const states = hooks.slice(start, start + 10).map(
-                                    (hook) => hook.memoizedState
-                                );
-                                const isRegistrationState =
-                                    typeof states[0] === "boolean" &&
-                                    typeof states[1] === "string" &&
-                                    typeof states[2] === "number" &&
-                                    typeof states[3] === "string" &&
-                                    typeof states[5] === "string" &&
-                                    typeof states[6] === "number" &&
-                                    states[7] &&
-                                    typeof states[7] === "object" &&
-                                    "line1" in states[7] &&
-                                    "postal_code" in states[7] &&
-                                    states[8] &&
-                                    typeof states[8] === "object" &&
-                                    "line1" in states[8] &&
-                                    typeof states[9] === "boolean";
-                                const tokenHook = hooks[start + 5];
-                                if (isRegistrationState && typeof tokenHook.queue?.dispatch === "function") {
-                                    tokenHook.queue.dispatch(token);
-                                    reactCallbackName = "registration-state-setter";
-                                    return true;
-                                }
-                            }
-                            return false;
-                        };
-                        const visit = (fiber) => {
-                            if (!fiber || reactCallbackInvoked || visited.has(fiber)) {
-                                return;
-                            }
-                            visited.add(fiber);
-                            const props = fiber.memoizedProps;
-                            if (invokeReactCallback(props)) {
-                                reactCallbackInvoked = true;
-                                return;
-                            }
-                            if (invokeRegistrationStateSetter(fiber)) {
-                                reactCallbackInvoked = true;
-                                return;
-                            }
-                            visit(fiber.child);
-                            visit(fiber.sibling);
-                        };
-                        roots.forEach(visit);
-                    }
-
-                    return {
-                        responseInputCount: responseInputs.length,
-                        reactCallbackInvoked,
-                        reactCallbackName,
-                    };
+                    return { error: "no report" };
                 }
                 """,
-                token,
+                {"token": token, "source": _INJECT_MAIN_WORLD_SOURCE},
             )
-            await self.page.wait_for_timeout(100)
-            logger.debug(
-                "Turnstile token injected "
-                f"(response inputs: {injection_result['responseInputCount']}, "
-                f"React callback: {injection_result['reactCallbackName'] or 'none'})"
-            )
-            if not injection_result.get("reactCallbackInvoked"):
-                # The submit button is disabled until the page's React
-                # state holds a token, so a missed callback is the most
-                # likely reason a later submit fails. Surface it here
-                # instead of letting it surface as a generic disabled
-                # button error in the submit step.
+
+            await self.page.wait_for_timeout(150)
+            logger.debug(f"Turnstile injection result: {injection_result}")
+
+            if injection_result.get("buttonDisabled") is not False:
                 logger.warning(
-                    "Turnstile token was written to the hidden input but "
-                    "no React token callback was invoked; the submit "
-                    "button may stay disabled"
+                    "Turnstile token was written but the submit button is still "
+                    f"disabled ({injection_result}); the submit step reports "
+                    "which form fields are invalid"
                 )
-            
         except Exception as e:
             logger.warning(f"Error injecting Turnstile token: {str(e)}")
-            # Don't raise error as this might not be critical
-    
+            # Not fatal on its own: the submit step reports the real blocker.
+
     async def _wait_for_verification_popup(self, timeout: int = 15) -> bool:
         """Wait for a verification popup or redirect after form submission."""
         logger.debug("Waiting for verification popup...")
